@@ -1,0 +1,61 @@
+# Релиз Astreya Gate: push тега `v*` → сборка установщика + артефакты
+# автообновления (latest.json + .sig) публикуются в GitHub Releases.
+#
+# ОДНОКРАЙНЯЯ НАСТРОЙКА (секреты репозитория → Settings → Secrets → Actions):
+#   TAURI_SIGNING_PRIVATE_KEY:            содержимое файла ~/.tauri/astreya-gate.key
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD:   пустая строка (ключ без пароля)
+#
+# Как выпустить версию:
+#   1) поднять version в package.json / src-tauri/tauri.conf.json / src-tauri/Cargo.toml
+#   2) git commit && git tag v1.0.1 && git push origin v1.0.1
+# Установленные приложения увидят апдейт в течение суток (или по кнопке «Проверить»).
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri
+            bridge
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - name: Build bridge
+        run: npm run bridge:build
+
+      - name: Build & publish app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Astreya Gate ${{ github.ref_name }}"
+          releaseBody: "Смотрите assets ниже: установщик и файлы автообновления (latest.json, .sig)."
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true

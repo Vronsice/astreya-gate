@@ -1,0 +1,46 @@
+[package]
+name = "astreya-gate"
+version = "1.0.0"
+description = "Astreya Gate: proxy & routing hub for AI apps and beyond"
+authors = ["vronsice"]
+edition = "2021"
+
+[lib]
+name = "astreya_gate_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# image-png: смена иконки трея на лету (живой статус моста)
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-opener = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-autostart = "2"
+# Системные тосты (мост упал/ожил, высокий пинг)
+tauri-plugin-notification = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+thiserror = "1"
+regex = "1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "socks"], default-features = false }
+url = "2"
+base64 = "0.22"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sysinfo = "0.32"
+dirs = "5"
+tauri-plugin-dialog = "2.7.1"
+tauri-plugin-updater = "2.10.1"
+tauri-plugin-process = "2.3.1"
+tauri-plugin-single-instance = "2.4.3"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

@@ -1,0 +1,91 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Astreya Gate",
+  "version": "1.0.0",
+  "identifier": "ru.vronsice.astreyagate",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ2M0EzQUIwOUNEOTIwODYKUldTR0lObWNzRG82Umk1ZDlyR3F3RW1IMlpDeGVPc3l4NHI4R3NSWWJNK1k5RURsYUJUUnFGaTMK",
+      "endpoints": [
+        "https://github.com/vronsice/astreya-gate/releases/latest/download/latest.json"
+      ]
+    }
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Astreya Gate",
+        "width": 960,
+        "height": 680,
+        "minWidth": 880,
+        "minHeight": 620,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": false,
+        "shadow": true,
+        "transparent": false,
+        "backgroundColor": "#101312"
+      },
+      {
+        "label": "tray",
+        "title": "Astreya Gate",
+        "url": "index.html?view=tray",
+        "width": 332,
+        "height": 404,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "focus": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": [
+      "resources/gate-bridge.exe",
+      "resources/sing-box.exe",
+      "resources/claude-setup.ps1",
+      "resources/claude-desktop-setup.ps1",
+      "resources/cursor-setup.ps1"
+    ],
+    "publisher": "vronsice",
+    "copyright": "Copyright (c) 2026 vronsice",
+    "category": "DeveloperTool",
+    "shortDescription": "Astreya Gate — прокси и маршрутизация для AI и любых приложений",
+    "longDescription": "Astreya Gate — десктопный центр управления приватностью: локальный мост с инжектом авторизации, маршрутизация по доменам (AI-сервисы через платный прокси, остальное через системный), PAC для браузеров, killswitch через файрвол. Автор: vronsice.",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      },
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "installMode": "currentUser",
+        "displayLanguageSelector": false,
+        "languages": ["Russian"]
+      }
+    }
+  }
+}

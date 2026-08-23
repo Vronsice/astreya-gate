@@ -1,0 +1,450 @@
+//! Автозапуск моста через Планировщик задач Windows (Scheduled Task).
+//!
+//! Зачем: .vbs в Startup-папке запускал мост ОДИН раз при логине; если процесс
+//! падал — поднять его мог только watchdog внутри GUI хелпера. GUI закрыт →
+//! мост лежит до ручного вмешательства.
+//!
+//! Механика: задача запускает wscript.exe с runner-vbs-СУПЕРВИЗОРОМ, который
+//! в бесконечном цикле стартует gate-bridge.exe СКРЫТО (окна нет), ждёт его
+//! завершения и через 5 секунд перезапускает. Падение моста лечится за ~5с
+//! на уровне ОС, без нашего GUI. Прямой запуск console-exe из задачи показал
+//! бы окно консоли при логине — поэтому wscript.
+//!
+//! Почему цикл в vbs, а не RestartOnFailure Планировщика: проверено вживую на
+//! Win11 — у Interactive-задачи ненулевой код выхода НЕ триггерит рестарт
+//! (задача умирает молча). RestartOnFailure оставлен в настройках задачи как
+//! best-effort на случай гибели самого wscript, но рассчитывать на него нельзя.
+//!
+//! Остановка: Stop-ScheduledTask убивает супервизор (иначе цикл поднимет мост
+//! через 5с после kill) — см. stop_ignore_errors и shim::stop.
+//!
+//! Регистрация НЕ требует админа: задача в пользовательской папке, LogonType
+//! Interactive, RunLevel Limited (проверено вживую на Win11).
+
+use std::path::PathBuf;
+
+use serde::Serialize;
+
+use crate::shim::{self, LISTEN_PORT};
+
+pub const TASK_NAME: &str = "AstreyaGate";
+/// Runner-vbs в папке установки моста (%LOCALAPPDATA%\AstreyaGate).
+const RUNNER_VBS: &str = "gate-bridge-task.vbs";
+/// Правила маршрутизации моста (mode smart/all) — читает gate-bridge при старте.
+const RULES_FILE: &str = "bridge-rules.json";
+
+/// Статус задачи автозапуска для UI.
+#[derive(Debug, Clone, Serialize)]
+pub struct BridgeTaskStatus {
+    pub registered: bool,
+    /// Ready / Running / Disabled — как отдаёт Планировщик.
+    pub state: Option<String>,
+}
+
+fn runner_vbs_path() -> Option<PathBuf> {
+    shim::install_dir().map(|d| d.join(RUNNER_VBS))
+}
+
+/// Группы AI-сервисов для назначения «сервис → конкретный прокси из пула».
+/// Ключи хранятся в settings.proxy_assignments; домены разворачиваются в
+/// rules-файл (мост матчит по суффиксу). Синхронизировано с UI (Настройки).
+pub const SERVICE_GROUPS: &[(&str, &[&str])] = &[
+    ("anthropic", &["anthropic.com", "claude.ai", "claude.com"]),
+    (
+        "openai",
+        &["openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com"],
+    ),
+    ("google", &["generativelanguage.googleapis.com", "ai.google.dev"]),
+    // OpenCode/CLI-агенты ходят в OpenRouter и провайдеров через него.
+    ("openrouter", &["openrouter.ai"]),
+    // Telegram-трафик (клиент сам умеет HTTP-прокси, но и через мост можно).
+    (
+        "telegram",
+        &[
+            "telegram.org",
+            "t.me",
+            "telesco.pe",
+            "telegram.me",
+            "tdesktop.com",
+            "cdn-telegram.org",
+            "core.telegram.org",
+        ],
+    ),
+    (
+        "other_ai",
+        &[
+            "x.ai",
+            "mistral.ai",
+            "perplexity.ai",
+            "githubcopilot.com",
+            "cursor.sh",
+            "cursor.com",
+        ],
+    ),
+];
+
+/// Записать rules-файл моста из settings (route_mode + proxy_assignments).
+/// Вызывается при регистрации задачи и при изменениях в UI. Возвращает путь
+/// для аргумента --rules.
+pub fn write_rules_file() -> Result<PathBuf, String> {
+    let s = crate::settings::load();
+    let mode = s
+        .route_mode
+        .clone()
+        .filter(|m| m == "smart")
+        .unwrap_or_else(|| "all".into());
+    let pool_len = crate::settings::effective_proxies(&s).len();
+
+    // Назначения: группа → индекс прокси; разворачиваем в домен → индекс.
+    let mut assignments = serde_json::Map::new();
+    for (group, idx) in &s.proxy_assignments {
+        if *idx >= pool_len {
+            continue;
+        }
+        if let Some((_, domains)) = SERVICE_GROUPS.iter().find(|(g, _)| g == group) {
+            for d in *domains {
+                assignments.insert((*d).to_string(), serde_json::json!(idx));
+            }
+        }
+    }
+
+    let json = serde_json::json!({
+        "mode": mode,
+        "default_upstream": s.default_upstream,
+        "assignments": assignments,
+    });
+    let path = shim::install_dir()
+        .map(|d| d.join(RULES_FILE))
+        .ok_or_else(|| "Не нашёл папку AstreyaGate".to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create dir {}: {e}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(&json).map_err(|e| format!("serialize rules: {e}"))?;
+    // Атомарно (tmp + rename): мост читает этот файл при старте, а супервизор
+    // может перезапустить его в любой момент — полузаписанный JSON для моста
+    // 1.2.0 означает отказ запуска (fail-fast), для старых — потерю правил.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, text).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("replace {}: {e}", path.display()))?;
+    Ok(path)
+}
+
+/// Зарегистрирована ли задача (быстрая проверка для ветвления start/stop).
+pub fn is_registered() -> bool {
+    status().registered
+}
+
+pub fn status() -> BridgeTaskStatus {
+    let script = format!(
+        "$t = Get-ScheduledTask -TaskName '{TASK_NAME}' -ErrorAction SilentlyContinue; \
+         if ($t) {{ Write-Output ('TASK_STATE:' + $t.State) }} else {{ Write-Output 'TASK_MISSING' }}"
+    );
+    let out = run_ps(&script).unwrap_or_default();
+    if let Some(state) = out.lines().find_map(|l| l.trim().strip_prefix("TASK_STATE:")) {
+        BridgeTaskStatus {
+            registered: true,
+            state: Some(state.trim().to_string()),
+        }
+    } else {
+        BridgeTaskStatus {
+            registered: false,
+            state: None,
+        }
+    }
+}
+
+/// Понимает ли установленный мост новые флаги (--rules)?
+///
+/// КРИТИЧНО: старый PyInstaller-мост на неизвестный аргумент падает (argparse
+/// exit 2) — супервизор вечно рестартил бы мёртвый мост, и прокси лежал бы
+/// НАМЕРТВО. Проба: `--version` есть только у Rust-моста (exit 0); старый
+/// на него падает → пишем легаси-набор аргументов без --rules.
+fn bridge_supports_rules(exe: &std::path::Path) -> bool {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--version");
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// Кэш пробы установленного exe. Ключ — mtime файла: после «Обновить мост»
+/// mtime меняется и кэш сбрасывается сам. Проба PyInstaller-exe стоит
+/// секунды (распаковка onefile) — без кэша UI-поллинг был бы болью.
+static EXE_PROBE_CACHE: std::sync::Mutex<Option<(std::time::SystemTime, bool)>> =
+    std::sync::Mutex::new(None);
+
+/// Понимает ли мост режим `--supervise` (1.3.0+)? Проба: `--supervise
+/// --version` — новый мост ставит флаг и выходит 0 на --version, старый
+/// падает на неизвестном аргументе. Если да — задача Планировщика вешается
+/// ПРЯМО на exe (без VBS/wscript: малварь-паттерн для антивирусов, WSH
+/// отключаем политиками, VBScript депрекейтнут в Win11 24H2+).
+fn bridge_supports_supervise(exe: &std::path::Path) -> bool {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(["--supervise", "--version"]);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// Установленный мост — легаси (старый PyInstaller-python, без /healthz и
+/// --rules)? По этому флагу UI показывает «Обновить мост» вместо вечного
+/// спиннера. false, если exe не найден вовсе.
+pub fn bridge_exe_is_legacy() -> bool {
+    let Some(exe) = shim::bridge_exe_path().filter(|p| p.exists()) else {
+        return false;
+    };
+    let mtime = std::fs::metadata(&exe)
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    if let Ok(guard) = EXE_PROBE_CACHE.lock() {
+        if let Some((t, legacy)) = guard.as_ref() {
+            if *t == mtime {
+                return *legacy;
+            }
+        }
+    }
+    let legacy = !bridge_supports_rules(&exe);
+    if let Ok(mut guard) = EXE_PROBE_CACHE.lock() {
+        *guard = Some((mtime, legacy));
+    }
+    legacy
+}
+
+/// Зарегистрировать (или перерегистрировать) задачу автозапуска моста.
+///
+/// Пишет runner-vbs с актуальным upstream-URL, регистрирует задачу и — только
+/// ПОСЛЕ успешной регистрации — удаляет легаси .vbs из Startup (порядок важен:
+/// если регистрация упала, старый автозапуск остаётся рабочим fallback'ом).
+pub fn register(proxy_url: &str) -> Result<(), String> {
+    let exe = shim::bridge_exe_path()
+        .ok_or_else(|| "Не нашёл папку AstreyaGate".to_string())?;
+    if !exe.exists() {
+        return Err(format!(
+            "Не найден {}. Запустите установщик заново.",
+            exe.display()
+        ));
+    }
+    let vbs_path = runner_vbs_path()
+        .ok_or_else(|| "Не нашёл папку AstreyaGate".to_string())?;
+
+    // Все прокси пула → повторяемые --upstream (+ --via для цепочек). ПОРЯДОК
+    // СВЯЩЕНЕН: индексы assignments в rules-файле считаются по этому же списку
+    // — перестановка здесь без пересчёта rules увела бы закреплённый сервис
+    // на другой прокси (другой выходной IP). Поэтому пул берём как есть из
+    // настроек; proxy_url — только fallback для пустого пула (легаси).
+    let pool: Vec<(String, Option<String>)> = {
+        let s = crate::settings::load();
+        let list = crate::settings::effective_proxies(&s);
+        if list.is_empty() {
+            vec![(proxy_url.to_string(), None)]
+        } else {
+            list.into_iter()
+                .map(|u| {
+                    let via = s.proxy_vias.get(&u).cloned();
+                    (u, via)
+                })
+                .collect()
+        }
+    };
+
+    let supports_rules = bridge_supports_rules(&exe);
+    let supports_supervise = supports_rules && bridge_supports_supervise(&exe);
+
+    // Действие задачи: мост 1.3.0+ супервизорит себя сам — задача вешается
+    // ПРЯМО на exe, VBS/wscript исчезают (антивирусный малварь-паттерн
+    // «exe пишет VBS + задача на wscript» + депрекация VBScript).
+    // Старые мосты — прежний VBS-путь, до первого «Обновить мост».
+    let (execute_e, argument_e) = if supports_supervise {
+        let rules_path = write_rules_file()?;
+        let mut parts: Vec<String> = vec![
+            "--supervise".into(),
+            "--listen".into(),
+            format!("127.0.0.1:{LISTEN_PORT}"),
+        ];
+        for (u, via) in &pool {
+            parts.push("--upstream".into());
+            parts.push(format!("\"{}\"", u.replace('"', "")));
+            if let Some(v) = via {
+                parts.push("--via".into());
+                parts.push(format!("\"{}\"", v.replace('"', "")));
+            }
+        }
+        parts.push("--rules".into());
+        parts.push(format!("\"{}\"", rules_path.to_string_lossy()));
+        parts.push("--quiet".into());
+        // Старый runner-vbs больше не нужен — подчищаем, чтобы не смущал AV.
+        if vbs_path.exists() {
+            let _ = std::fs::remove_file(&vbs_path);
+        }
+        (
+            exe.to_string_lossy().replace('\'', "''"),
+            parts.join(" ").replace('\'', "''"),
+        )
+    } else {
+        // Легаси: runner-СУПЕРВИЗОР на VBS — скрытый запуск, перезапуск через
+        // 5с. --rules только для Rust-моста (см. bridge_supports_rules).
+        let args_expr = if supports_rules {
+            let rules_path = write_rules_file()?;
+            format!(
+                "\" --listen 127.0.0.1:{port} --rules \" & Chr(34) & \"{rules}\" & Chr(34) & \" --quiet\"",
+                port = LISTEN_PORT,
+                rules = rules_path.to_string_lossy(),
+            )
+        } else {
+            format!("\" --listen 127.0.0.1:{port} --quiet\"", port = LISTEN_PORT)
+        };
+        let upstreams_expr: String = pool
+            .iter()
+            .map(|(u, via)| {
+                let mut s = format!(
+                    " & \" --upstream \" & Chr(34) & \"{}\" & Chr(34)",
+                    u.replace('"', "")
+                );
+                if let Some(v) = via {
+                    s.push_str(&format!(
+                        " & \" --via \" & Chr(34) & \"{}\" & Chr(34)",
+                        v.replace('"', "")
+                    ));
+                }
+                s
+            })
+            .collect();
+        let vbs = format!(
+            "' Astreya Gate bridge supervisor: держит мост запущенным; упавший процесс\r\n\
+             ' перезапускается через 5 секунд. Остановка — Stop-ScheduledTask.\r\n\
+             Set sh = CreateObject(\"WScript.Shell\")\r\n\
+             Do\r\n\
+             code = sh.Run(Chr(34) & \"{exe}\" & Chr(34){upstreams} & {args}, 0, True)\r\n\
+             WScript.Sleep 5000\r\n\
+             Loop\r\n",
+            exe = exe.to_string_lossy(),
+            upstreams = upstreams_expr,
+            args = args_expr,
+        );
+        // UTF-16LE с BOM: wscript без BOM читает .vbs в ANSI-кодировке системы,
+        // и кириллический путь профиля превращается в кракозябры — мост не
+        // стартовал бы ни при одном логине.
+        let vbs_utf16: Vec<u8> = [0xFF_u8, 0xFE]
+            .into_iter()
+            .chain(vbs.encode_utf16().flat_map(|u| u.to_le_bytes()))
+            .collect();
+        std::fs::write(&vbs_path, vbs_utf16)
+            .map_err(|e| format!("write {}: {e}", vbs_path.display()))?;
+        (
+            "wscript.exe".to_string(),
+            format!("\"{}\"", vbs_path.to_string_lossy()).replace('\'', "''"),
+        )
+    };
+
+    let script = format!(
+        "$user = \"$env:USERDOMAIN\\$env:USERNAME\"; \
+         $action = New-ScheduledTaskAction -Execute '{execute_e}' -Argument '{argument_e}'; \
+         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user; \
+         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries \
+           -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) \
+           -ExecutionTimeLimit (New-TimeSpan) -MultipleInstances IgnoreNew; \
+         $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited; \
+         Register-ScheduledTask -TaskName '{TASK_NAME}' -Action $action -Trigger $trigger \
+           -Settings $settings -Principal $principal -Force | Out-Null; \
+         Write-Output 'TASK_REGISTERED'"
+    );
+    let out = run_ps(&script)
+        .ok_or_else(|| "powershell.exe не выполнил регистрацию задачи".to_string())?;
+    if !out.contains("TASK_REGISTERED") {
+        return Err(format!("Не удалось зарегистрировать задачу: {out}"));
+    }
+
+    // Миграция: легаси-автозапуск из Startup больше не нужен.
+    if let Some(legacy) = shim::startup_vbs_path() {
+        if legacy.exists() {
+            let _ = std::fs::remove_file(&legacy);
+        }
+    }
+    Ok(())
+}
+
+/// Запустить задачу (мост поднимется скрыто через runner-vbs).
+pub fn start() -> Result<(), String> {
+    let script = format!(
+        "Start-ScheduledTask -TaskName '{TASK_NAME}'; Write-Output 'TASK_STARTED'"
+    );
+    let out = run_ps(&script)
+        .ok_or_else(|| "powershell.exe не выполнил запуск задачи".to_string())?;
+    if out.contains("TASK_STARTED") {
+        Ok(())
+    } else {
+        Err(format!("Не удалось запустить задачу: {out}"))
+    }
+}
+
+/// Остановить задачу. ОБЯЗАТЕЛЬНО вызывать ПЕРЕД kill процессов моста:
+/// runner-супервизор перезапустил бы убитый мост через 5с, и «Остановить»
+/// в UI не работало бы. Stop-ScheduledTask убивает супервизор (wscript) —
+/// после этого мост можно гасить спокойно. Ошибки глотаем (задачи может
+/// не быть на легаси-установке).
+pub fn stop_ignore_errors() {
+    let _ = run_ps(&format!(
+        "Stop-ScheduledTask -TaskName '{TASK_NAME}' -ErrorAction SilentlyContinue; \
+         Write-Output 'DONE'"
+    ));
+}
+
+/// Миграция старой установки: есть легаси .vbs в Startup, задачи ещё нет,
+/// upstream известен из settings → регистрируем задачу (она удалит .vbs).
+/// Вызывается фоново при старте приложения; все ошибки — в лог, не наружу.
+pub fn migrate_from_startup_vbs() {
+    let legacy_exists = shim::startup_vbs_path().map(|p| p.exists()).unwrap_or(false);
+    if !legacy_exists || is_registered() {
+        return;
+    }
+    let Some(url) = crate::settings::load().proxy_url else {
+        return;
+    };
+    match register(&url) {
+        Ok(()) => tracing::info!("миграция автозапуска: Startup .vbs → задача {TASK_NAME}"),
+        Err(e) => tracing::warn!("миграция автозапуска не удалась: {e}"),
+    }
+}
+
+/// Публичная обёртка run_ps для соседних модулей (browser.rs и т.п.):
+/// UTF-8-прелюдия + CREATE_NO_WINDOW уже внутри.
+pub fn run_ps_public(script: &str) -> Option<String> {
+    run_ps(script)
+}
+
+fn run_ps(script: &str) -> Option<String> {
+    use std::process::Command;
+    // UTF-8-прелюдия обязательна: PowerShell 5.1 пишет в пайп OEM-кодировкой
+    // (cp866 на русской Windows), и from_utf8_lossy превращает кириллицу
+    // (пути профиля, тексты ошибок) в кашу U+FFFD.
+    let script = format!(
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; \
+         $OutputEncoding=[System.Text.Encoding]::UTF8; {script}"
+    );
+    let mut cmd = Command::new("powershell.exe");
+    cmd.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        script.as_str(),
+    ]);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd.output().ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).to_string())
+}
