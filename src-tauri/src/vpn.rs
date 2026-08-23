@@ -585,8 +585,30 @@ pub fn parse_link(link: &str) -> Result<ParsedLink, String> {
 // ─── Подписки ────────────────────────────────────────────────────
 
 /// Разобрать тело подписки в список сырых ссылок:
-/// base64-блоб ИЛИ plain-текст построчно; SIP008 не поддерживаем (редок).
+///   1) base64-блоб ссылок
+///   2) plain-текст построчно
+///   3) JSON-массив конфигов v2rayN (fmt=best у суб-конвертеров): каждый
+///      элемент — полный конфиг с outbounds; конвертируем ОБРАТНО в
+///      канонические ссылки, чтобы вся остальная архитектура (хранение,
+///      UI, генерация конфига) осталась без изменений.
 pub fn parse_subscription_body(body: &str) -> Vec<String> {
+    let trimmed = body.trim();
+    // v2rayN-массив: начинается с '[' и внутри есть outbounds.
+    if trimmed.starts_with('[') {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if v.is_array() {
+                let links: Vec<String> = v
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(v2rayn_config_to_link)
+                    .collect();
+                if !links.is_empty() {
+                    return links;
+                }
+            }
+        }
+    }
     let text = match b64_any(body) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
         Err(_) => body.to_string(),
@@ -597,46 +619,238 @@ pub fn parse_subscription_body(body: &str) -> Vec<String> {
         .collect()
 }
 
-/// Скачать тело подписки. Стратегия: напрямую → при неудаче через мост
-/// (подписки часто закрыты для прямого доступа без VPN).
-pub async fn fetch_subscription(url: &str) -> Result<String, String> {
-    let ua = "AstreyaGate/1.0";
-    // Попытка 1: напрямую.
-    let direct = reqwest::Client::builder()
-        .user_agent(ua)
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .map_err(|e| format!("client: {e}"))?
-        .get(url)
-        .send()
-        .await;
-    if let Ok(resp) = direct {
-        if let Ok(text) = resp.text().await {
-            if !text.trim().is_empty() {
-                return Ok(text);
+// ─── Конвертер v2rayN-config → ссылка ───────────────────────────
+
+/// Из одного элемента массива v2rayN вытащить основной outbound и собрать
+/// каноническую ссылку протокола. None — протокол не поддерживаем.
+fn v2rayn_config_to_link(cfg: &serde_json::Value) -> Option<String> {
+    let name = cfg
+        .get("remarks")
+        .and_then(|r| r.as_str())
+        .unwrap_or("")
+        .to_string();
+    let outs = cfg.get("outbounds")?.as_array()?;
+    // Основной outbound: первый непрямой протокол (freedom/blacklist — служебные).
+    let supported = ["vless", "vmess", "shadowsocks", "trojan", "hysteria2", "tuic"];
+    let out = outs
+        .iter()
+        .find(|o| {
+            let p = o.get("protocol").and_then(|p| p.as_str()).unwrap_or("");
+            supported.contains(&p)
+        })?;
+
+    let proto = out.get("protocol")?.as_str()?;
+    let settings = out.get("settings")?;
+    let stream = out.get("streamSettings");
+
+    let net = stream
+        .and_then(|s| s.get("network"))
+        .and_then(|n| n.as_str())
+        .unwrap_or("tcp")
+        .to_string();
+    let security = stream
+        .and_then(|s| s.get("security"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("none")
+        .to_string();
+    let tls_s = stream.and_then(|s| s.get("tlsSettings"));
+    let real_s = stream.and_then(|s| s.get("realitySettings"));
+    let grpc_s = stream.and_then(|s| s.get("grpcSettings"));
+    let ws_s = stream.and_then(|s| s.get("wsSettings"));
+    let h2_s = stream.and_then(|s| s.get("httpSettings"));
+
+    let sni = real_s
+        .and_then(|r| r.get("serverName"))
+        .or_else(|| tls_s.and_then(|t| t.get("serverName")))
+        .and_then(|s| s.as_str())
+        .unwrap_or("");
+    let fp = real_s
+        .and_then(|r| r.get("fingerprint"))
+        .or_else(|| tls_s.and_then(|t| t.get("fingerprint")))
+        .and_then(|s| s.as_str())
+        .unwrap_or("chrome");
+    let insecure = tls_s
+        .and_then(|t| t.get("allowInsecure"))
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false);
+
+    let mut q: Vec<(String, String)> = Vec::new();
+    let mut push = |k: &str, v: &str| {
+        if !v.is_empty() {
+            q.push((k.to_string(), urlencode(v)));
+        }
+    };
+
+    match proto {
+        "vless" => {
+            let vnext = settings.get("vnext")?.as_array()?.first()?.clone();
+            let host = vnext.get("address")?.as_str()?.to_string();
+            let port = vnext.get("port")?.as_u64()? as u16;
+            let user = vnext.get("users")?.as_array()?.first()?.clone();
+            let uuid = user.get("id")?.as_str()?.to_string();
+            let flow = user.get("flow").and_then(|f| f.as_str()).unwrap_or("");
+            push("encryption", "none");
+            if security == "reality" {
+                push("security", "reality");
+                push("sni", sni);
+                push("fp", fp);
+                if let Some(pbk) = real_s.and_then(|r| r.get("publicKey")).and_then(|s| s.as_str()) {
+                    push("pbk", pbk);
+                }
+                if let Some(sid) = real_s.and_then(|r| r.get("shortId")).and_then(|s| s.as_str()) {
+                    push("sid", sid);
+                }
+            } else if security == "tls" {
+                push("security", "tls");
+                push("sni", sni);
+                if insecure {
+                    push("allowInsecure", "1");
+                }
             }
+            if !flow.is_empty() {
+                push("flow", flow);
+            }
+            push("type", &net);
+            if let Some(p) = ws_s.and_then(|w| w.get("path")).and_then(|s| s.as_str()) {
+                push("path", p);
+            }
+            if let Some(h) = ws_s
+                .and_then(|w| w.get("headers"))
+                .and_then(|h| h.get("Host"))
+                .and_then(|s| s.as_str())
+            {
+                push("host", h);
+            }
+            if let Some(sn) = grpc_s.and_then(|g| g.get("serviceName")).and_then(|s| s.as_str()) {
+                push("serviceName", sn);
+            }
+            let frag = urlencode(&name);
+            Some(format!("vless://{uuid}@{host}:{port}?{}#{frag}", qs(&q)))
+        }
+        "vmess" => {
+            let vnext = settings.get("vnext")?.as_array()?.first()?.clone();
+            let host = vnext.get("address")?.as_str()?.to_string();
+            let port = vnext.get("port")?.as_u64()? as u16;
+            let user = vnext.get("users")?.as_array()?.first()?.clone();
+            let id = user.get("id")?.as_str()?.to_string();
+            let aid = user.get("alterId").and_then(|a| a.as_u64()).unwrap_or(0);
+            let scy = user
+                .get("security")
+                .and_then(|s| s.as_str())
+                .unwrap_or("auto");
+            let tls_flag = if security == "tls" || security == "reality" { "tls" } else { "" };
+            let payload = serde_json::json!({
+                "v": "2",
+                "ps": name,
+                "add": host,
+                "port": port.to_string(),
+                "id": id,
+                "aid": aid.to_string(),
+                "scy": scy,
+                "net": net,
+                "type": "",
+                "host": ws_s
+                    .and_then(|w| w.get("headers"))
+                    .and_then(|h| h.get("Host"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or(""),
+                "path": ws_s.and_then(|w| w.get("path")).and_then(|s| s.as_str()).unwrap_or(""),
+                "tls": tls_flag,
+                "sni": sni,
+                "fp": fp,
+            });
+            use base64::Engine;
+            Some(format!(
+                "vmess://{}",
+                base64::engine::general_purpose::STANDARD.encode(payload.to_string())
+            ))
+        }
+        "shadowsocks" => {
+            let srv = settings.get("servers")?.as_array()?.first()?.clone();
+            let host = srv.get("address")?.as_str()?.to_string();
+            let port = srv.get("port")?.as_u64()? as u16;
+            let method = srv.get("method")?.as_str()?.to_string();
+            let pass = srv.get("password")?.as_str()?.to_string();
+            use base64::Engine;
+            let ui = base64::engine::general_purpose::STANDARD
+                .encode(format!("{method}:{pass}"));
+            let frag = urlencode(&name);
+            Some(format!("ss://{ui}@{host}:{port}#{frag}"))
+        }
+        "trojan" => {
+            let srv = settings.get("servers")?.as_array()?.first()?.clone();
+            let host = srv.get("address")?.as_str()?.to_string();
+            let port = srv.get("port")?.as_u64()? as u16;
+            let pass = srv.get("password")?.as_str()?.to_string();
+            if security != "none" {
+                push("security", "tls");
+            }
+            push("sni", sni);
+            if insecure {
+                push("allowInsecure", "1");
+            }
+            push("type", &net);
+            let frag = urlencode(&name);
+            Some(format!("trojan://{}@{host}:{port}?{}#{frag}", urlencode(&pass), qs(&q)))
+        }
+        // Остальные (hysteria2/tuic в v2rayN-формате редки и нестандартны) —
+        // нода пропускается, остальные из массива импортируются.
+        _ => None,
+    }
+}
+
+/// Собрать query-строку из пар (значения уже urlencoded).
+fn qs(pairs: &[(String, String)]) -> String {
+    pairs
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// Похоже ли тело на HTML-заглушку (антибот/ошибка провайдера).
+fn looks_like_html(s: &str) -> bool {
+    let head = s.trim_start().to_ascii_lowercase();
+    head.starts_with("<!doctype") || head.starts_with("<html")
+}
+
+/// Скачать тело подписки. Цепочка попыток:
+///   1) напрямую с нашим UA
+///   2) напрямую с UA v2rayN (часть провайдеров отдаёт контент только
+///      «своим» клиентам, иначе — HTML-заглушку)
+///   3) через мост (подписка закрыта для прямого доступа без VPN)
+pub async fn fetch_subscription(url: &str) -> Result<String, String> {
+    let attempts: [(&str, bool); 3] = [
+        ("AstreyaGate/1.0", false),
+        ("v2rayN/6.45", false),
+        ("AstreyaGate/1.0", true),
+    ];
+    let mut last_err = String::new();
+    for (ua, via_bridge) in attempts {
+        let mut builder = reqwest::Client::builder()
+            .user_agent(ua)
+            .timeout(std::time::Duration::from_secs(if via_bridge { 25 } else { 20 }));
+        if via_bridge {
+            let proxy = reqwest::Proxy::all(format!(
+                "http://127.0.0.1:{}",
+                crate::shim::LISTEN_PORT
+            ))
+            .map_err(|e| format!("bridge proxy: {e}"))?;
+            builder = builder.proxy(proxy);
+        }
+        let client = builder.build().map_err(|e| format!("client: {e}"))?;
+        match client.get(url).send().await {
+            Ok(resp) => match resp.text().await {
+                Ok(text) if !text.trim().is_empty() && !looks_like_html(&text) => {
+                    return Ok(text);
+                }
+                Ok(_) => last_err = format!("UA {ua}: пустой ответ или HTML-заглушка"),
+                Err(e) => last_err = format!("UA {ua}: тело не прочитано ({e})"),
+            },
+            Err(e) => last_err = format!("UA {ua}: {e}"),
         }
     }
-    // Попытка 2: через мост (он сам решает upstream).
-    let bridge_proxy = reqwest::Proxy::all(format!(
-        "http://127.0.0.1:{}",
-        crate::shim::LISTEN_PORT
-    ))
-    .map_err(|e| format!("bridge proxy: {e}"))?;
-    let via_bridge = reqwest::Client::builder()
-        .user_agent(ua)
-        .timeout(std::time::Duration::from_secs(25))
-        .proxy(bridge_proxy)
-        .build()
-        .map_err(|e| format!("client: {e}"))?;
-    let resp = via_bridge
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("прямая и через мост недоступны ({e})"))?;
-    resp.text()
-        .await
-        .map_err(|e| format!("тело подписки не прочиталось: {e}"))
+    Err(format!("прямая и через мост недоступны ({last_err})"))
 }
 
 /// Уникальный id ноды/подписки: хеш строки + наносекунды.
@@ -1492,10 +1706,128 @@ mod tests {
     }
 
     #[test]
+    fn subscription_v2rayn_json_array() {
+        // fmt=best у суб-конвертеров отдаёт массив ПОЛНЫХ конфигов v2rayN.
+        // Регресс-тест на реальный формат подписки пользователя.
+        let body = serde_json::json!([
+            {
+                "remarks": "🇩🇪 Германия Reality",
+                "outbounds": [
+                    { "tag": "proxy", "protocol": "vless",
+                      "settings": { "vnext": [{ "address": "de.example.com", "port": 443,
+                        "users": [{ "id": "uuid-1", "flow": "xtls-rprx-vision", "encryption": "none" }] }] },
+                      "streamSettings": { "network": "tcp", "security": "reality",
+                        "realitySettings": { "serverName": "www.microsoft.com", "publicKey": "SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc", "shortId": "6ba8", "fingerprint": "chrome" } } },
+                    { "tag": "direct", "protocol": "freedom" }
+                ]
+            },
+            {
+                "remarks": "🇳🇱 SS",
+                "outbounds": [
+                    { "tag": "proxy", "protocol": "shadowsocks",
+                      "settings": { "servers": [{ "address": "nl.example.com", "port": 8388, "method": "aes-256-gcm", "password": "p@ss w" }] } },
+                    { "tag": "direct", "protocol": "freedom" }
+                ]
+            },
+            {
+                "remarks": "служебный",
+                "outbounds": [ { "tag": "direct", "protocol": "freedom" } ]
+            }
+        ])
+        .to_string();
+        let links = parse_subscription_body(&body);
+        assert_eq!(links.len(), 2, "freedom-only конфиг пропускается");
+
+        // Первая нода конвертируется в валидный vless и обратно парсится.
+        assert!(links[0].starts_with("vless://"));
+        assert!(links[0].contains("security=reality"));
+        assert!(links[0].contains("pbk=SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc"));
+        let parsed = parse_link(&links[0]).unwrap();
+        assert_eq!(parsed.server, "de.example.com");
+        assert_eq!(parsed.outbound["flow"], "xtls-rprx-vision");
+        assert_eq!(parsed.outbound["tls"]["reality"]["short_id"], "6ba8");
+
+        // Вторая — в ss с пробелом в пароле (percent-encoding туда-обратно).
+        assert!(links[1].starts_with("ss://"));
+        let parsed2 = parse_link(&links[1]).unwrap();
+        assert_eq!(parsed2.outbound["password"], "p@ss w");
+        assert_eq!(parsed2.outbound["method"], "aes-256-gcm");
+    }
+
+    #[test]
+    fn subscription_v2rayn_trojan_and_vmess() {
+        let body = serde_json::json!([
+            {
+                "remarks": "Troj node",
+                "outbounds": [
+                    { "tag": "proxy", "protocol": "trojan",
+                      "settings": { "servers": [{ "address": "t.io", "port": 443, "password": "pw1" }] },
+                      "streamSettings": { "network": "tcp", "security": "tls",
+                        "tlsSettings": { "serverName": "t.io", "allowInsecure": true } } }
+                ]
+            },
+            {
+                "remarks": "VM node",
+                "outbounds": [
+                    { "tag": "proxy", "protocol": "vmess",
+                      "settings": { "vnext": [{ "address": "v.io", "port": 443,
+                        "users": [{ "id": "vm-uuid", "alterId": 0, "security": "auto" }] }] },
+                      "streamSettings": { "network": "ws", "security": "tls",
+                        "tlsSettings": { "serverName": "v.io" },
+                        "wsSettings": { "path": "/ray", "headers": { "Host": "front.io" } } } }
+                ]
+            }
+        ])
+        .to_string();
+        let links = parse_subscription_body(&body);
+        assert_eq!(links.len(), 2);
+
+        let t = parse_link(&links[0]).unwrap();
+        assert_eq!(t.proto, "trojan");
+        assert_eq!(t.outbound["password"], "pw1");
+        assert_eq!(t.outbound["tls"]["insecure"], true);
+
+        assert!(links[1].starts_with("vmess://"));
+        let v = parse_link(&links[1]).unwrap();
+        assert_eq!(v.proto, "vmess");
+        assert_eq!(v.server, "v.io");
+        assert_eq!(v.outbound["transport"]["path"], "/ray");
+        assert_eq!(v.outbound["transport"]["headers"]["Host"], "front.io");
+        assert_eq!(v.name, "VM node");
+    }
+
+    #[test]
     fn garbage_links_rejected() {
         assert!(parse_link("vless://no-at-sign").is_err());
         assert!(parse_link("http://not-a-proxy").is_err());
         assert!(parse_link("vmess://!!!not-base64!!!").is_err());
+    }
+
+    /// Локальная проверка реального тела подписки:
+    ///   SUB_BODY_FILE=path cargo test real_subscription_body
+    /// Без переменной (CI) мгновенно проходит.
+    #[test]
+    fn real_subscription_body() {
+        let Ok(path) = std::env::var("SUB_BODY_FILE") else {
+            return;
+        };
+        if path.is_empty() {
+            return;
+        }
+        let body = std::fs::read_to_string(&path).expect("читаю файл тела");
+        let links = parse_subscription_body(&body);
+        assert!(!links.is_empty(), "из реального тела не извлеклась ни одна ссылка");
+        let bad: Vec<&String> = links
+            .iter()
+            .filter(|l| parse_link(l).is_err())
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "битых ссылок {} из {}: первый пример: {:?}",
+            bad.len(),
+            links.len(),
+            bad.first().map(|s| &s[..s.len().min(120)])
+        );
     }
 
     // ─── Deep-links ───
