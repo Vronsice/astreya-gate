@@ -64,6 +64,23 @@ jobs:
           Expand-Archive wintun.zip -DestinationPath wintun-tmp -Force
           Copy-Item wintun-tmp/wintun/bin/amd64/wintun.dll src-tauri/resources/wintun.dll -Force
 
+      - name: Extract release notes from CHANGELOG.md
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"            # v1.2.3
+          $ver = $tag.TrimStart("v")
+          $notes = New-Object System.Collections.Generic.List[string]
+          $capture = $false
+          foreach ($l in (Get-Content CHANGELOG.md -Encoding UTF8)) {
+            if ($l -match "^##\s+\[$ver\]") { $capture = $true; continue }
+            if ($capture -and $l -match "^##\s+\[") { break }
+            if ($capture) { $notes.Add($l) }
+          }
+          $text = ($notes -join "`n").Trim()
+          if (-not $text) { $text = "Astreya Gate $ver — смотрите список изменений в CHANGELOG.md." }
+          "RELEASE_NOTES<<EOF`n$text`nEOF" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Заметки ($($text.Length) симв.): $($text.Substring(0, [Math]::Min(80, $text.Length)))..."
+
       - name: Build & publish app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -73,7 +90,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Astreya Gate ${{ github.ref_name }}"
-          releaseBody: "Смотрите assets ниже: установщик и файлы автообновления (latest.json, .sig)."
+          releaseBody: ${{ env.RELEASE_NOTES }}
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
