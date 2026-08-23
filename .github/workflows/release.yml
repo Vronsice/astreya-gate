@@ -57,6 +57,13 @@ jobs:
           $exe = Get-ChildItem singbox-tmp -Recurse -Filter "sing-box.exe" | Select-Object -First 1
           Copy-Item $exe.FullName src-tauri/resources/sing-box.exe -Force
 
+      - name: Download wintun driver (TUN mode)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile wintun.zip
+          Expand-Archive wintun.zip -DestinationPath wintun-tmp -Force
+          Copy-Item wintun-tmp/wintun/bin/amd64/wintun.dll src-tauri/resources/wintun.dll -Force
+
       - name: Build & publish app
         uses: tauri-apps/tauri-action@v0
         env:

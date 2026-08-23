@@ -133,6 +133,9 @@ pub fn run() {
             commands::vpn_import,
             commands::vpn_set_route,
             commands::vpn_set_autostart,
+            commands::vpn_tun_status,
+            commands::vpn_tun_enable,
+            commands::vpn_tun_disable,
             // Окна (трей-попап)
             commands::show_main_window,
             commands::quit_app,

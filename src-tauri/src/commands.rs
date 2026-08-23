@@ -1545,6 +1545,60 @@ pub async fn vpn_set_autostart(v: bool) -> Result<VpnOverview, String> {
     Ok(vpn_overview().await?)
 }
 
+// ─── VPN: системный режим (TUN) ─────────────────────────────────
+
+/// Статус системного режима (задача AstreyaGateTUN + процесс).
+#[tauri::command]
+pub async fn vpn_tun_status() -> Result<crate::vpn::TunStatus, String> {
+    tokio::task::spawn_blocking(crate::vpn::tun_status)
+        .await
+        .map_err(|e| format!("Внутренняя ошибка: {e}"))
+}
+
+/// Включить системный режим: остановить прокси-режим, записать config-tun,
+/// перерегистрировать задачу Highest (один UAC), запустить задачу.
+#[tauri::command]
+pub async fn vpn_tun_enable() -> Result<crate::vpn::TunStatus, String> {
+    let s = settings::load();
+    let active_id = s.vpn_active.clone().ok_or("Выберите ноду для подключения")?;
+    let node = s
+        .vpn_nodes
+        .iter()
+        .find(|n| n.id == active_id)
+        .ok_or("Активная нода исчезла — выберите другую")?
+        .clone();
+    let link = node.link.clone();
+
+    // Взаимное исключение: прокси-режим гасим.
+    tokio::task::spawn_blocking(crate::vpn::stop)
+        .await
+        .map_err(|e| format!("Внутренняя ошибка: {e}"))?;
+
+    let cfg_path = tokio::task::spawn_blocking(move || crate::vpn::write_tun_config(&link))
+        .await
+        .map_err(|e| format!("Внутренняя ошибка: {e}"))??;
+
+    // Регистрация задачи с актуальным конфигом (один UAC).
+    let cp = cfg_path.clone();
+    tokio::task::spawn_blocking(move || crate::vpn::tun_register(&cp))
+        .await
+        .map_err(|e| format!("Внутренняя ошибка: {e}"))??;
+
+    tokio::task::spawn_blocking(crate::vpn::tun_start)
+        .await
+        .map_err(|e| format!("Внутренняя ошибка: {e}"))??;
+    Ok(crate::vpn::tun_status())
+}
+
+/// Выключить системный режим.
+#[tauri::command]
+pub async fn vpn_tun_disable() -> Result<crate::vpn::TunStatus, String> {
+    tokio::task::spawn_blocking(crate::vpn::tun_stop)
+        .await
+        .map_err(|e| format!("Внутренняя ошибка: {e}"))?;
+    Ok(crate::vpn::tun_status())
+}
+
 /// Обработать deep-link / ссылку из буфера: astreya://, happ://add,
 /// happ-crypt (ошибка), либо плейн-ссылки конфигов.
 /// Возвращает человекочитаемый итог для тоста.

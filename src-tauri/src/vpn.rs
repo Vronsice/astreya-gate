@@ -216,6 +216,9 @@ fn tls_block(q: &Query, sni_default: &str) -> Option<serde_json::Value> {
     }
     if let Some(fp) = q.get("fp").filter(|s| !s.is_empty()) {
         t["utls"] = serde_json::json!({ "enabled": true, "fingerprint": fp });
+    } else if reality {
+        // Reality-клиент в sing-box требует uTLS — ставим дефолтный отпечаток.
+        t["utls"] = serde_json::json!({ "enabled": true, "fingerprint": "chrome" });
     }
     if reality {
         t["reality"] = serde_json::json!({
@@ -1124,6 +1127,231 @@ pub async fn refresh_subscriptions_inner(
     Ok((updated, total))
 }
 
+// ─── Системный режим (TUN) ───────────────────────────────────────
+// Перехват ВСЕГО трафика через виртуальный адаптер (как Happ/TUN-режимы).
+// sing-box обязан работать с правами администратора: регистрируем задачу
+// Планировщика AstreyaGateTUN c RunLevel Highest (один UAC при включении),
+// дальше Start/Stop-ScheduledTask без UAC.
+
+const TUN_TASK: &str = "AstreyaGateTUN";
+
+/// Конфиг TUN-варианта: tun-inbound с auto_route + DNS через туннель +
+/// hijack порта 53 + auto_detect_interface (защита от петли) + те же
+/// правила маршрутизации, что у прокси-режима.
+pub fn build_config_tun(
+    node_outbound: serde_json::Value,
+    mode: TunnelRoute,
+    whitelist: &[String],
+) -> Result<serde_json::Value, String> {
+    let mut o = node_outbound;
+    o["tag"] = serde_json::json!("proxy");
+    let mut rules = vec![
+        // Сниффер: определяем домен из TLS SNI/HTTP Host для domain-правил.
+        serde_json::json!({ "action": "sniff" }),
+        // Весь DNS перехватываем — иначе утечка мимо туннеля/фейловый резолв.
+        serde_json::json!({ "protocol": "dns", "action": "hijack-dns" }),
+    ];
+    rules.extend(route_rules(mode, whitelist));
+    // Локальные/LAN-адреса всегда напрямую (роутер, принтер, localhost-сервисы).
+    rules.push(serde_json::json!({ "ip_is_private": true, "outbound": "direct" }));
+
+    let final_out = if mode == TunnelRoute::Whitelist {
+        "direct"
+    } else {
+        "proxy"
+    };
+    Ok(serde_json::json!({
+        "log": { "level": "error" },
+        "experimental": { "clash_api": { "external_controller": format!("127.0.0.1:{CLASH_API_PORT}") } },
+        "dns": {
+            // Новый формат DNS (sing-box 1.12+): legacy address-строки удалены в 1.14.
+            "servers": [
+                { "type": "https", "tag": "remote", "server": "1.1.1.1", "detour": "proxy" },
+                { "type": "local", "tag": "local", "detour": "direct" }
+            ],
+            "final": "remote",
+            "strategy": "prefer_ipv4"
+        },
+        "inbounds": [{
+            "type": "tun",
+            "tag": "tun-in",
+            "interface_name": "astreya0",
+            "address": ["172.19.0.1/30"],
+            "mtu": 1400,
+            "auto_route": true,
+            "strict_route": false,
+            "stack": "mixed"
+        }],
+        "outbounds": [o, { "type": "direct", "tag": "direct" }],
+        "route": {
+            "rules": rules,
+            "final": final_out,
+            "auto_detect_interface": true,
+            "default_domain_resolver": { "server": "remote" }
+        }
+    }))
+}
+
+fn exe_path_any() -> Result<std::path::PathBuf, String> {
+    // Для задач Планировщика нужен УСТАНОВЛЕННЫЙ путь: рядом лежит wintun.dll,
+    // и права на папку стабильны после установки. Dev-fallback сохранён.
+    exe_path()
+}
+
+pub fn write_tun_config(link: &str) -> Result<std::path::PathBuf, String> {
+    let s = crate::settings::load();
+    let parsed = parse_link(link)?;
+    let cfg = build_config_tun(
+        parsed.outbound,
+        TunnelRoute::from_str(&s.vpn_route_mode),
+        &s.vpn_whitelist_sites,
+    )?;
+    let dir = config_dir()?;
+    let path = dir.join("config-tun.json");
+    let text = serde_json::to_string_pretty(&cfg).map_err(|e| format!("serialize: {e}"))?;
+    std::fs::write(&path, text).map_err(|e| format!("write config-tun: {e}"))?;
+    Ok(path)
+}
+
+/// Зарегистрировать задачу AstreyaGateTUN (RunLevel Highest → один UAC).
+/// Аргументы задачи фиксируются при регистрации, поэтому register вызывается
+/// перед КАЖДЫМ включением TUN — перезаписывает действие с актуальным конфигом.
+pub fn tun_register(config_path: &std::path::Path) -> Result<(), String> {
+    let exe = exe_path_any()?;
+    // wintun.dll обязан лежать рядом с sing-box.exe.
+    let dll = exe.parent().unwrap().join("wintun.dll");
+    if !dll.exists() {
+        return Err("рядом с sing-box.exe нет wintun.dll — переустановите приложение".into());
+    }
+    let user = "$env:USERDOMAIN\\$env:USERNAME";
+    let script = format!(
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; \
+         $action = New-ScheduledTaskAction -Execute '{exe}' -Argument 'run -c \"{cfg}\"'; \
+         $principal = New-ScheduledTaskPrincipal -UserId \"{user}\" -LogonType Interactive -RunLevel Highest; \
+         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan) -MultipleInstances IgnoreNew; \
+         Register-ScheduledTask -TaskName '{task}' -Action $action -Principal $principal -Settings $settings -Force | Out-Null; \
+         Write-Output 'TUN_TASK_OK'",
+        exe = exe.to_string_lossy().replace('\'', "''"),
+        cfg = config_path.to_string_lossy().replace('\'', "''"),
+        task = TUN_TASK,
+    );
+    run_elevated(&script)
+}
+
+/// Запустить TUN через задачу (без UAC — задача уже Highest).
+pub fn tun_start() -> Result<(), String> {
+    crate::tasks::run_ps_public(&format!(
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; \
+         Start-ScheduledTask -TaskName '{TUN_TASK}'; Write-Output 'STARTED'"
+    ))
+    .filter(|o| o.contains("STARTED"))
+    .ok_or_else(|| String::from("задача AstreyaGateTUN не зарегистрирована"))?;
+    // Ждём поднятия процесса до 8с.
+    for _ in 0..16 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if process_status().running {
+            return Ok(());
+        }
+    }
+    Err("sing-box (TUN) не поднялся за 8с — смотри журнал задачи или параметры ноды".into())
+}
+
+/// Остановить TUN: гасим задачу и добиваем процессы (страховка от
+/// «осиротевшего» воркера задачи).
+pub fn tun_stop() -> usize {
+    let _ = crate::tasks::run_ps_public(&format!(
+        "Stop-ScheduledTask -TaskName '{TUN_TASK}' -ErrorAction SilentlyContinue; Write-Output 'DONE'"
+    ));
+    stop()
+}
+
+/// Статус TUN для UI.
+#[derive(Debug, Clone, Serialize)]
+pub struct TunStatus {
+    pub registered: bool,
+    pub state: Option<String>,
+    pub running_process: bool,
+}
+
+pub fn tun_status() -> TunStatus {
+    let out = crate::tasks::run_ps_public(&format!(
+        "$t = Get-ScheduledTask -TaskName '{TUN_TASK}' -ErrorAction SilentlyContinue; \
+         if ($t) {{ Write-Output ('STATE:' + $t.State) }} else {{ Write-Output 'MISSING' }}"
+    ))
+    .unwrap_or_default();
+    let registered = out.contains("STATE:");
+    let state = out
+        .lines()
+        .find_map(|l| l.strip_prefix("STATE:"))
+        .map(|s| s.trim().to_string());
+    TunStatus {
+        registered,
+        state,
+        running_process: process_status().running,
+    }
+}
+
+/// Запуск elevated PowerShell (один UAC) с ожиданием результата.
+fn run_elevated(inner_script: &str) -> Result<(), String> {
+    use std::process::Command;
+    let tmp = dirs::config_dir()
+        .map(|d| d.join("Astreya Gate"))
+        .unwrap_or_else(std::env::temp_dir);
+    let _ = std::fs::create_dir_all(&tmp);
+    let script_path = tmp.join("astreyagate-tun.ps1");
+    let result_path = tmp.join("astreyagate-tun-result.txt");
+    let _ = std::fs::remove_file(&result_path);
+
+    let full_inner = format!(
+        "$ErrorActionPreference='Continue'; \
+         try {{ {inner} }} catch {{ Set-Content -LiteralPath '{res}' -Value ('ERR:' + $_.Exception.Message); exit 1 }}; \
+         Set-Content -LiteralPath '{res}' -Value 'OK'; exit 0",
+        inner = inner_script,
+        res = result_path.to_string_lossy().replace('\'', "''"),
+    );
+    std::fs::write(&script_path, &full_inner)
+        .map_err(|e| format!("не записать временный скрипт: {e}"))?;
+
+    let wrapper = format!(
+        "$p = Start-Process powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden \
+           -ArgumentList '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File','{script}'; \
+         exit $p.ExitCode",
+        script = script_path.to_string_lossy().replace('\'', "''"),
+    );
+    let mut cmd = Command::new("powershell.exe");
+    cmd.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        &wrapper,
+    ]);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let status = cmd
+        .status()
+        .map_err(|e| format!("UAC-запрос не запущен: {e}"))?;
+
+    let result = std::fs::read_to_string(&result_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&script_path);
+    let _ = std::fs::remove_file(&result_path);
+
+    if result.trim() == "OK" {
+        Ok(())
+    } else if let Some(err) = result.trim().strip_prefix("ERR:") {
+        Err(format!("TUN-регистрация: {err}"))
+    } else if !status.success() {
+        Err("Запрос прав администратора отклонён".into())
+    } else {
+        Err("Не удалось подтвердить регистрацию задачи TUN".into())
+    }
+}
+
 // ─── Тесты парсеров ссылок ───────────────────────────────────────
 
 #[cfg(test)]
@@ -1358,5 +1586,42 @@ mod tests {
         assert_eq!(rules[0]["outbound"], "proxy");
         assert!(rules[0]["domain_suffix"].as_array().unwrap().len() == 2);
         assert_eq!(cfg["route"]["final"], "proxy"); // финал не мешает правилу
+    }
+
+    // ─── Системный режим (TUN) ───
+
+    #[test]
+    fn tun_config_structure_is_complete() {
+        let cfg = build_config_tun(
+            serde_json::json!({"type":"vless","uuid":"u","server":"s","server_port":443}),
+            TunnelRoute::Smart,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(cfg["inbounds"][0]["type"], "tun");
+        assert_eq!(cfg["inbounds"][0]["auto_route"], true);
+        assert_eq!(cfg["inbounds"][0]["interface_name"], "astreya0");
+        assert_eq!(cfg["dns"]["final"], "remote");
+        assert_eq!(cfg["dns"]["servers"][0]["detour"], "proxy");
+        let rules = cfg["route"]["rules"].as_array().unwrap();
+        assert!(rules.iter().any(|r| r["action"] == "hijack-dns"));
+        assert!(rules.iter().any(|r| r["action"] == "sniff"));
+        assert!(rules
+            .iter()
+            .any(|r| r["outbound"] == "direct"
+                && r.get("ip_is_private") == Some(&serde_json::json!(true))));
+        assert_eq!(cfg["route"]["auto_detect_interface"], true);
+    }
+
+    #[test]
+    fn tun_whitelist_final_direct() {
+        let wl = vec!["openai.com".to_string()];
+        let cfg =
+            build_config_tun(serde_json::json!({"type":"direct"}), TunnelRoute::Whitelist, &wl)
+                .unwrap();
+        assert_eq!(cfg["route"]["final"], "direct");
+        let rules = cfg["route"]["rules"].as_array().unwrap();
+        // [0]=sniff [1]=dns-hijack [2]=whitelist→proxy
+        assert_eq!(rules[2]["outbound"], "proxy");
     }
 }

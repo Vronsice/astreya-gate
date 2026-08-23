@@ -31,6 +31,10 @@ import {
   vpnSetRoute,
   vpnStart,
   vpnStop,
+  vpnTunDisable,
+  vpnTunEnable,
+  vpnTunStatus,
+  type TunStatus,
 } from "../lib/api";
 import { formatBytes } from "../lib/format";
 import type { VpnNode, VpnOverview } from "../lib/types";
@@ -64,6 +68,7 @@ function ago(ts?: number): string {
 
 export function Vpn() {
   const [ov, setOv] = useState<VpnOverview | null>(null);
+  const [tun, setTun] = useState<TunStatus | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pings, setPings] = useState<Record<string, number | null>>({});
@@ -110,6 +115,7 @@ export function Vpn() {
     } catch (e) {
       setError(String(e));
     }
+    setTun(await vpnTunStatus().catch(() => null));
   }, [adopt]);
 
   useEffect(() => {
@@ -393,6 +399,63 @@ export function Vpn() {
           <span className="break-all">{error}</span>
         </motion.div>
       )}
+
+      {/* ── Системный режим (TUN) ── */}
+      <motion.section variants={fadeInUp} className="surface-card p-4">
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span
+                className={cn(
+                  "h-2 w-2 shrink-0 rounded-full",
+                  tun?.running_process ? "bg-vb-emerald" : "bg-vb-border-strong",
+                )}
+              />
+              <span className="text-[14px] font-semibold text-vb-fg">Системный режим</span>
+              {tun?.state && (
+                <span className="rounded-md border border-vb-border bg-vb-surface-2 px-1.5 py-px text-[10px] text-vb-silver-faint">
+                  задача: {tun.state}
+                </span>
+              )}
+            </div>
+            <p className="mt-1 text-[12px] leading-relaxed text-vb-silver-dim">
+              Перехватывает <b>весь</b> трафик Windows через виртуальный адаптер —
+              даже приложения без поддержки прокси. Включение попросит права
+              администратора один раз.
+            </p>
+          </div>
+          {busy === "tun" ? (
+            <Loader2 className="h-4 w-4 shrink-0 animate-spin text-vb-silver-dim" />
+          ) : (
+            <Toggle
+              checked={!!tun?.running_process}
+              onChange={async (v) => {
+                if (!ov?.active) {
+                  setError("Сначала выберите ноду — она станет системным VPN");
+                  return;
+                }
+                setBusy("tun");
+                setError(null);
+                try {
+                  setTun(v ? await vpnTunEnable() : await vpnTunDisable());
+                } catch (e) {
+                  setError(String(e));
+                } finally {
+                  setBusy(null);
+                  void load();
+                }
+              }}
+              disabled={busy !== null || !ov?.active}
+              label="Системный режим"
+            />
+          )}
+        </div>
+        {!ov?.active && (
+          <p className="mt-2 text-[11px] text-vb-silver-faint">
+            Выберите ноду ниже — затем включите режим.
+          </p>
+        )}
+      </motion.section>
 
       {/* ── Подписки ── */}
       <motion.section variants={fadeInUp} className="surface-card flex flex-col gap-3 p-4">

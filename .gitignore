@@ -46,6 +46,8 @@ __pycache__/
 src-tauri/resources/gate-bridge.exe
 # sing-box бандлится отдельно (сторонний бинарник, качается скриптом релиза)
 src-tauri/resources/sing-box.exe
+# wintun-драйвер для TUN-режима (сторонний, качается скриптом релиза)
+src-tauri/resources/wintun.dll
 
 # Ключи подписи обновлений — НИКОГДА в репозитории
 *.key

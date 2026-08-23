@@ -352,6 +352,27 @@ export async function vpnSetAutostart(v: boolean): Promise<VpnOverview> {
   return invoke<VpnOverview>("vpn_set_autostart", { v });
 }
 
+// ─── VPN: системный режим (TUN) ──────────────────────────────────
+
+export interface TunStatus {
+  registered: boolean;
+  state?: string;
+  running_process: boolean;
+}
+
+export async function vpnTunStatus(): Promise<TunStatus> {
+  return invoke<TunStatus>("vpn_tun_status");
+}
+
+/** Включение потребует один UAC-запрос на регистрацию задачи. */
+export async function vpnTunEnable(): Promise<TunStatus> {
+  return invoke<TunStatus>("vpn_tun_enable");
+}
+
+export async function vpnTunDisable(): Promise<TunStatus> {
+  return invoke<TunStatus>("vpn_tun_disable");
+}
+
 // ─── Окна (для трей-попапа) ──────────────────────────────────────
 
 /** Показать главное окно (из трей-попапа). */
