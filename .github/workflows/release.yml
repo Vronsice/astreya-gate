@@ -46,6 +46,17 @@ jobs:
       - name: Build bridge
         run: npm run bridge:build
 
+      - name: Download sing-box engine
+        shell: pwsh
+        run: |
+          $r = Invoke-RestMethod "https://api.github.com/repos/SagerNet/sing-box/releases/latest"
+          $asset = $r.assets | Where-Object { $_.name -match "^sing-box-[\d\.]+-windows-amd64\.zip$" } | Select-Object -First 1
+          Write-Host "sing-box: $($asset.name)"
+          Invoke-WebRequest $asset.browser_download_url -OutFile singbox.zip
+          Expand-Archive singbox.zip -DestinationPath singbox-tmp -Force
+          $exe = Get-ChildItem singbox-tmp -Recurse -Filter "sing-box.exe" | Select-Object -First 1
+          Copy-Item $exe.FullName src-tauri/resources/sing-box.exe -Force
+
       - name: Build & publish app
         uses: tauri-apps/tauri-action@v0
         env:
