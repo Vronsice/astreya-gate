@@ -1,11 +1,9 @@
 import { AnimatePresence, motion } from "framer-motion";
 import {
-  AppWindow,
   BookOpen,
+  Blocks,
   Compass,
-  Globe,
-  House,
-  LayoutGrid,
+  ListChecks,
   Settings2,
   Waypoints,
   Wifi,
@@ -17,23 +15,21 @@ import { cn } from "../lib/cn";
 import type { AppView } from "../lib/types";
 
 export const NAV_ORDER: AppView[] = [
-  "overview",
-  "proxies",
-  "vpn",
   "map",
+  "nodes",
+  "rules",
+  "bridge",
   "browsers",
-  "apps",
   "guide",
   "settings",
 ];
 
-/* Обзор в списке не нужен: главным меню служит бренд-блок сверху. */
-const NAV_ITEMS: { id: AppView; label: string; icon: typeof LayoutGrid }[] = [
-  { id: "proxies", label: "Прокси", icon: Globe },
-  { id: "vpn", label: "VPN", icon: Wifi },
+const NAV_ITEMS: { id: AppView; label: string; icon: typeof Waypoints }[] = [
   { id: "map", label: "Карта", icon: Waypoints },
+  { id: "nodes", label: "Ноды", icon: Wifi },
+  { id: "rules", label: "Правила", icon: ListChecks },
+  { id: "bridge", label: "AI-мост", icon: Blocks },
   { id: "browsers", label: "Браузеры", icon: Compass },
-  { id: "apps", label: "Приложения", icon: AppWindow },
   { id: "guide", label: "Гид", icon: BookOpen },
   { id: "settings", label: "Настройки", icon: Settings2 },
 ];
@@ -88,17 +84,17 @@ export function Sidebar({ view, onNavigate }: Props) {
           проявляется домик-подсказка (ярче при наведении) + tooltip. */}
       <button
         type="button"
-        onClick={() => onNavigate("overview")}
-        aria-label="Astreya Gate — Обзор"
-        aria-current={view === "overview" ? "page" : undefined}
-        title={view !== "overview" ? "На главную" : undefined}
+        onClick={() => onNavigate("map")}
+        aria-label="Astreya Gate — Карта"
+        aria-current={view === "map" ? "page" : undefined}
+        title={view !== "map" ? "К Карте" : undefined}
         className={cn(
           "group relative mx-2.5 mb-3 mt-2.5 flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left",
           "transition-colors duration-150 active:scale-[0.98]",
-          view !== "overview" && "hover:bg-vb-surface-2/50",
+          view !== "map" && "hover:bg-vb-surface-2/50",
         )}
       >
-        {view === "overview" && (
+        {view === "map" && (
           <motion.span
             layoutId="nav-pill"
             className="absolute inset-0 rounded-lg border border-vb-border bg-vb-surface-2"
@@ -116,7 +112,7 @@ export function Sidebar({ view, onNavigate }: Props) {
           </div>
         </div>
         <AnimatePresence>
-          {view !== "overview" && (
+          {view !== "map" && (
             <motion.span
               initial={{ opacity: 0, scale: 0.8 }}
               animate={{ opacity: 1, scale: 1 }}
@@ -125,7 +121,7 @@ export function Sidebar({ view, onNavigate }: Props) {
               className="relative shrink-0 text-vb-silver-faint transition-colors duration-150 group-hover:text-vb-silver"
               aria-hidden
             >
-              <House className="h-3.5 w-3.5" strokeWidth={1.9} />
+              <Waypoints className="h-3.5 w-3.5" strokeWidth={1.9} />
             </motion.span>
           )}
         </AnimatePresence>
@@ -176,7 +172,7 @@ export function Sidebar({ view, onNavigate }: Props) {
       {/* Живой статус моста — всегда на виду */}
       <button
         type="button"
-        onClick={() => onNavigate("overview")}
+        onClick={() => onNavigate("map")}
         className={cn(
           "mx-2.5 mb-3 flex items-center gap-2.5 rounded-lg border border-vb-border/70 px-3 py-2.5 text-left",
           "transition-colors duration-150 hover:border-vb-border-strong hover:bg-vb-surface-2/40 active:scale-[0.98]",

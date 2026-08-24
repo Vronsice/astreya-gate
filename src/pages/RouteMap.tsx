@@ -19,6 +19,8 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   AppWindow,
   Globe,
+  Loader2,
+  MonitorUp,
   Plus,
   Power,
   TerminalSquare,
@@ -27,6 +29,8 @@ import {
   X,
   Zap,
 } from "lucide-react";
+import { StatusOrb } from "../components/StatusOrb";
+import { Toggle } from "../components/Toggle";
 import {
   bridgeSetRouteMode,
   browsersDisable,
@@ -43,11 +47,15 @@ import {
   vpnRuleSave,
   vpnRulesGet,
   vpnSetActive,
+  vpnSetAutostart,
   vpnSetRoute,
   vpnStart,
   vpnStop,
   vpnSystemProxyGet,
   vpnSystemProxySet,
+  vpnTunDisable,
+  vpnTunEnable,
+  vpnTunStatus,
 } from "../lib/api";
 import { formatUptime, useStatus } from "../lib/status";
 import type { AppView, BridgeHealth, RoutingRule, VpnOverview } from "../lib/types";
@@ -274,6 +282,7 @@ function RouteMap({ onNavigate }: { onNavigate?: (v: AppView) => void }) {
   const [addText, setAddText] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
   const [rules, setRules] = useState<RoutingRule[] | null>(null);
+  const [tun, setTun] = useState<{ running_process: boolean } | null>(null);
   const lastTotals = useRef<{ t: number; up: number; down: number } | null>(null);
 
   const flash = (m: string) => {
@@ -313,6 +322,10 @@ function RouteMap({ onNavigate }: { onNavigate?: (v: AppView) => void }) {
     };
     void tick();
     void vpnSystemProxyGet().then((v) => alive && setLive((p) => ({ ...p, sysProxy: v }))).catch(() => {});
+    void vpnRulesGet().then((r) => alive && setRules(r)).catch(() => {});
+    void vpnTunStatus()
+      .then((t) => alive && setTun({ running_process: t.running_process }))
+      .catch(() => {});
     void vpnRulesGet().then((r) => alive && setRules(r)).catch(() => {});
     void vpnPingAll()
       .then((r) => {
@@ -496,6 +509,8 @@ function RouteMap({ onNavigate }: { onNavigate?: (v: AppView) => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [live, vpnRunning, bridgeRunning, envOn, smart, poolOk, activeNode]);
 
+  const orbState = !live.ov ? ("loading" as const) : vpnRunning ? ("ok" as const) : ("down" as const);
+
   const selectedNode = nodes.find((n) => n.id === selected);
 
   const addNode = async () => {
@@ -516,7 +531,115 @@ function RouteMap({ onNavigate }: { onNavigate?: (v: AppView) => void }) {
   };
 
   return (
-    <div className="relative flex h-full gap-3">
+    <div className="flex h-full flex-col gap-3">
+      {/* ── Панель управления движком (дом-пульт) ── */}
+      <div className="flex shrink-0 items-center gap-3 rounded-xl border border-vb-border bg-vb-bg px-4 py-3">
+        <StatusOrb state={orbState} size={11} />
+        <div className="min-w-0">
+          <div className="text-[14px] font-semibold leading-tight text-vb-fg">
+            {vpnRunning ? "Защищено" : "Выключено"}
+          </div>
+          <div className="tnum truncate text-[11px] text-vb-silver-faint">
+            {vpnRunning
+              ? `${activeNode?.name ?? "нода"}${
+                  live.speed ? ` · ↓ ${fmtSpeed(live.speed.down)} · ↑ ${fmtSpeed(live.speed.up)}` : ""
+                }`
+              : live.ov?.active
+                ? `нода: ${activeNode?.name ?? "—"}`
+                : "нода не выбрана"}
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => act(() => (vpnRunning ? vpnStop() : vpnStart()))}
+          disabled={busy}
+          title={vpnRunning ? "Выключить туннель" : "Включить туннель"}
+          className={cn(
+            "ml-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-all active:scale-[0.92] disabled:opacity-40",
+            vpnRunning
+              ? "bg-vb-emerald/15 text-vb-emerald hover:bg-vb-emerald/25"
+              : "bg-vb-surface text-vb-silver-dim hover:bg-vb-surface-2 hover:text-vb-emerald",
+          )}
+        >
+          {busy ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Power className="h-4 w-4" strokeWidth={2.2} />
+          )}
+        </button>
+
+        <div className="mx-1 h-8 w-px shrink-0 bg-vb-border/70" />
+
+        {/* Режим маршрутизации */}
+        <div className="flex shrink-0 gap-1.5">
+          {(
+            [
+              ["all", "Всё"],
+              ["smart", "Умный"],
+              ["whitelist", "Белый список"],
+            ] as const
+          ).map(([m, label]) => (
+            <button
+              key={m}
+              type="button"
+              disabled={busy || !live.ov}
+              onClick={() =>
+                live.ov &&
+                live.ov.route_mode !== m &&
+                act(() => vpnSetRoute(m, live.ov!.whitelist_sites))
+              }
+              className={cn(
+                "rounded-lg border px-3 py-1.5 text-[12px] font-medium transition-colors disabled:opacity-40",
+                live.ov?.route_mode === m
+                  ? "border-vb-emerald/50 bg-vb-emerald/[0.08] text-vb-emerald"
+                  : "border-vb-border bg-vb-surface text-vb-silver-dim hover:text-vb-silver",
+              )}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex-1" />
+
+        {/* Системный режим (TUN) */}
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() =>
+            act(async () => {
+              const t = tun?.running_process
+                ? await vpnTunDisable()
+                : await vpnTunEnable();
+              setTun({ running_process: t.running_process });
+            })
+          }
+          title="Системный режим: перехват всего трафика Windows (TUN). Требует прав администратора."
+          className={cn(
+            "flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[12px] font-medium transition-colors disabled:opacity-40",
+            tun?.running_process
+              ? "border-vb-emerald/50 bg-vb-emerald/[0.08] text-vb-emerald"
+              : "border-vb-border bg-vb-surface text-vb-silver-dim hover:text-vb-silver",
+          )}
+        >
+          <MonitorUp className="h-3.5 w-3.5" />
+          Системный режим
+        </button>
+
+        {/* Автоподключение */}
+        <label className="flex shrink-0 cursor-pointer items-center gap-2 text-[12px] text-vb-silver">
+          Автостарт
+          <Toggle
+            checked={live.ov?.autostart ?? false}
+            onChange={(v) => act(() => vpnSetAutostart(v))}
+            disabled={busy || !live.ov}
+            label="Подключать при запуске"
+          />
+        </label>
+      </div>
+
+      <div className="relative flex min-h-0 flex-1 gap-3">
       <div className="min-w-0 flex-1 overflow-hidden rounded-xl border border-vb-border bg-vb-bg">
         <ReactFlow
           nodes={nodes}
@@ -662,6 +785,7 @@ function RouteMap({ onNavigate }: { onNavigate?: (v: AppView) => void }) {
           </motion.aside>
         )}
       </AnimatePresence>
+      </div>
     </div>
   );
 }
@@ -781,7 +905,7 @@ function MapPanel({
           <button type="button" className={btn} onClick={onToggleSmart} disabled={busy || !health}>
             {health?.mode === "smart" ? "Пустить всё через пул" : "Включить умную маршрутизацию"}
           </button>
-          <button type="button" className={btn} onClick={() => onNavigate("proxies")}>
+          <button type="button" className={btn} onClick={() => onNavigate("bridge")}>
             Настроить пул прокси
           </button>
         </>
@@ -810,7 +934,7 @@ function MapPanel({
               ? `Живых прокси: ${health.upstreams.filter((u) => u.healthy).length} из ${health.upstreams.length}.`
               : "Мост остановлен."}
           </p>
-          <button type="button" className={btn} onClick={() => onNavigate("proxies")}>
+          <button type="button" className={btn} onClick={() => onNavigate("bridge")}>
             Открыть «Прокси»
           </button>
         </>

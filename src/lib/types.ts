@@ -77,12 +77,11 @@ export interface ShimTestResult {
 // ─── App-level navigation ────────────────────────────────────────
 
 export type AppView =
-  | "overview"
-  | "proxies"
-  | "vpn"
   | "map"
+  | "nodes"
+  | "rules"
+  | "bridge"
   | "browsers"
-  | "apps"
   | "guide"
   | "settings"
   | "wizard";

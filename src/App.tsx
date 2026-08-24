@@ -6,14 +6,13 @@ import { WizardShell } from "./components/WizardShell";
 import { StepProxy } from "./wizard/StepProxy";
 import { StepInstall } from "./wizard/StepInstall";
 import { StepDone } from "./wizard/StepDone";
-import { Overview } from "./pages/Overview";
-import { Proxies } from "./pages/Proxies";
-import { Vpn } from "./pages/Vpn";
 import { RouteMapPage } from "./pages/RouteMap";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { Nodes } from "./pages/Nodes";
+import { Rules } from "./pages/Rules";
+import { Bridge } from "./pages/Bridge";
 import { Browsers } from "./pages/Browsers";
 import { Guide } from "./pages/Guide";
-import { Apps } from "./pages/Apps";
 import { Settings } from "./pages/Settings";
 import { TrayPopup } from "./pages/TrayPopup";
 import { StatusProvider } from "./lib/status";
@@ -46,7 +45,7 @@ const viewVariants = {
 function App() {
   // ─── Top-level routing ───────────────────────────────────────
   // На старте определяем: установлен ли уже мост → Обзор, иначе Wizard.
-  const [view, setView] = useState<AppView | null>(IS_TRAY ? "overview" : null);
+  const [view, setView] = useState<AppView | null>(IS_TRAY ? "map" : null);
   const prevIndex = useRef(0);
   const [direction, setDirection] = useState(1);
 
@@ -64,7 +63,7 @@ function App() {
           shimStatus().catch(() => null),
         ]);
         const installed = !!s?.proxy_url || !!scriptPath || !!status?.running;
-        setView(installed ? "overview" : "wizard");
+        setView(installed ? "map" : "wizard");
       } catch {
         setView("wizard");
       }
@@ -122,7 +121,7 @@ function App() {
                 />
               )}
               {step === "done" && wizResult && (
-                <StepDone result={wizResult} onFinish={() => setView("overview")} />
+                <StepDone result={wizResult} onFinish={() => setView("map")} />
               )}
             </WizardShell>
           </div>
@@ -152,18 +151,16 @@ function App() {
                    даёт height:auto, и канва схлопывается в ноль. */
                 className={view === "map" ? "h-full" : "min-h-full"}
               >
-                {view === "overview" ? (
-                  <Overview onOpenProxies={() => navigate("proxies")} />
-                ) : view === "proxies" ? (
-                  <Proxies />
-                ) : view === "vpn" ? (
-                  <Vpn />
-                ) : view === "map" ? (
+                {view === "map" ? (
                   <RouteMapPage onNavigate={navigate} />
+                ) : view === "nodes" ? (
+                  <Nodes />
+                ) : view === "rules" ? (
+                  <Rules />
+                ) : view === "bridge" ? (
+                  <Bridge />
                 ) : view === "browsers" ? (
                   <Browsers />
-                ) : view === "apps" ? (
-                  <Apps />
                 ) : view === "guide" ? (
                   <Guide />
                 ) : view === "settings" ? (
