@@ -5,6 +5,7 @@ import {
   Controls,
   Handle,
   MarkerType,
+  Panel,
   Position,
   ReactFlow,
   ReactFlowProvider,
@@ -18,14 +19,24 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   AppWindow,
   Globe,
+  Plus,
   Power,
   TerminalSquare,
   Waypoints,
   Wifi,
+  X,
   Zap,
 } from "lucide-react";
 import {
   bridgeSetRouteMode,
+  browsersDisable,
+  browsersEnable,
+  browsersStatus,
+  clearGlobalProxyEnv,
+  setGlobalProxyEnv,
+  shimStart,
+  shimStop,
+  vpnAddLink,
   vpnOverview,
   vpnPingAll,
   vpnSetActive,
@@ -57,20 +68,17 @@ const fmtSpeed = (bps?: number) =>
         ? `${Math.round(bps / 1024)} КБ/с`
         : `${Math.round(bps)} Б/с`;
 
-/* ── данные карты ────────────────────────────────────────────── */
-
 interface MapData {
   ov: VpnOverview | null;
   sysProxy: boolean | null;
+  pac: boolean | null;
   speed: { up: number; down: number } | null;
   pings: Record<string, number> | null;
 }
 
-/* ── кастомные узлы ──────────────────────────────────────────── */
+const EMPTY_LIVE: MapData = { ov: null, sysProxy: null, pac: null, speed: null, pings: null };
 
-/* Дефолт на первый рендер: ReactFlow монтирует узлы с data:{} до того,
-   как эффект наполнит их живыми данными — без дефолта будет TypeError. */
-const EMPTY_LIVE: MapData = { ov: null, sysProxy: null, speed: null, pings: null };
+/* ── кастомные узлы ──────────────────────────────────────────── */
 
 function NodeShell({
   active,
@@ -78,17 +86,20 @@ function NodeShell({
   selected,
   children,
   handles = "lr",
+  compact,
 }: {
   active: boolean;
   problem?: boolean;
   selected: boolean;
   children: React.ReactNode;
   handles?: "lr" | "l" | "r";
+  compact?: boolean;
 }) {
   return (
     <div
       className={cn(
-        "w-[210px] rounded-xl border bg-vb-bg/95 px-3 py-2.5 shadow-lg backdrop-blur transition-colors",
+        "rounded-xl border bg-vb-bg/95 shadow-lg backdrop-blur transition-colors",
+        compact ? "w-[190px] px-3 py-2" : "w-[210px] px-3 py-2.5",
         problem
           ? "border-vb-loss/60"
           : active
@@ -113,24 +124,24 @@ function MetricChip({ label, value, accent }: { label: string; value: string; ac
   );
 }
 
-type SourceNodeData = { live: MapData; envOn: boolean; active: boolean };
+type SourceNodeData = { live: MapData; active: boolean };
 function BrowserNode({ data, selected }: NodeProps) {
-  const d = (data as unknown as SourceNodeData) ?? { live: EMPTY_LIVE, envOn: false, active: false };
+  const d = (data as unknown as SourceNodeData) ?? { live: EMPTY_LIVE, active: false };
+  const live = d.live ?? EMPTY_LIVE;
+  const via = live.sysProxy === true ? "через VPN-туннель" : live.pac === true ? "через мост (PAC)" : "напрямую, без VPN";
   return (
-    <NodeShell active={d.active} selected={selected} handles="r">
+    <NodeShell active={!!d.active} selected={selected} handles="r">
       <div className="flex items-center gap-2">
         <Globe className="h-4 w-4 text-vb-silver-dim" />
         <span className="text-[13px] font-semibold text-vb-fg">Браузеры</span>
       </div>
-      <div className={cn("mt-1 text-[11px]", d.active ? "text-vb-emerald" : "text-vb-silver-faint")}>
-        {d.active ? "через VPN-туннель" : "напрямую, без VPN"}
-      </div>
+      <div className={cn("mt-1 text-[11px]", d.active ? "text-vb-emerald" : "text-vb-silver-faint")}>{via}</div>
     </NodeShell>
   );
 }
 
 function AppsNode({ data, selected }: NodeProps) {
-  const d = (data as unknown as SourceNodeData) ?? { live: EMPTY_LIVE, envOn: false, active: false };
+  const d = (data as unknown as SourceNodeData) ?? { live: EMPTY_LIVE, active: false };
   return (
     <NodeShell active={!!d.active} selected={selected} handles="r">
       <div className="flex items-center gap-2">
@@ -143,9 +154,9 @@ function AppsNode({ data, selected }: NodeProps) {
 }
 
 function EnvNode({ data, selected }: NodeProps) {
-  const d = (data as unknown as SourceNodeData) ?? { live: EMPTY_LIVE, envOn: false, active: false };
+  const d = (data as unknown as SourceNodeData) ?? { live: EMPTY_LIVE, active: false };
   return (
-    <NodeShell active={d.active} selected={selected} handles="r">
+    <NodeShell active={!!d.active} selected={selected} handles="r">
       <div className="flex items-center gap-2">
         <TerminalSquare className="h-4 w-4 text-vb-silver-dim" />
         <span className="text-[13px] font-semibold text-vb-fg">Система (env)</span>
@@ -225,16 +236,17 @@ function BridgeNode({ data, selected }: NodeProps) {
   );
 }
 
-type ExitNodeData = { live: MapData; name: string; flag: string; sub: string; active: boolean; problem?: boolean };
+type ExitNodeData = { name: string; flag: string; sub: string; active: boolean; problem?: boolean; live: MapData };
 function ExitNode({ data, selected }: NodeProps) {
   const d = (data as unknown as ExitNodeData) ?? { live: EMPTY_LIVE, name: "", flag: "", sub: "", active: false };
   return (
-    <NodeShell active={d.active} problem={d.problem} selected={selected} handles="l">
+    <NodeShell active={!!d.active} problem={d.problem} selected={selected} handles="l" compact>
       <div className="flex items-center gap-2">
         <span className="text-[15px] leading-none">{d.flag}</span>
         <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-vb-fg">{d.name}</span>
+        {d.active && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-vb-emerald" />}
       </div>
-      <div className={cn("mt-1 truncate text-[11px]", d.active ? "text-vb-emerald" : "text-vb-silver-faint")}>{d.sub}</div>
+      <div className={cn("mt-0.5 truncate text-[11px]", d.active ? "text-vb-emerald" : "text-vb-silver-faint")}>{d.sub}</div>
     </NodeShell>
   );
 }
@@ -250,12 +262,20 @@ const nodeTypes = {
 
 /* ── страница ────────────────────────────────────────────────── */
 
-export function RouteMap({ onNavigate }: { onNavigate?: (v: AppView) => void }) {
+function RouteMap({ onNavigate }: { onNavigate?: (v: AppView) => void }) {
   const { health, env } = useStatus();
-  const [live, setLive] = useState<MapData>({ ov: null, sysProxy: null, speed: null, pings: null });
+  const [live, setLive] = useState<MapData>(EMPTY_LIVE);
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const [addText, setAddText] = useState("");
+  const [notice, setNotice] = useState<string | null>(null);
   const lastTotals = useRef<{ t: number; up: number; down: number } | null>(null);
+
+  const flash = (m: string) => {
+    setNotice(m);
+    window.setTimeout(() => setNotice(null), 5000);
+  };
 
   useEffect(() => {
     let alive = true;
@@ -277,6 +297,12 @@ export function RouteMap({ onNavigate }: { onNavigate?: (v: AppView) => void }) 
           lastTotals.current = { t: now, up: o.up_total, down: o.down_total };
         }
         if (alive) setLive((p) => ({ ...p, ov: o, speed }));
+      } catch {
+        /* переживаем */
+      }
+      try {
+        const b = await browsersStatus();
+        if (alive) setLive((p) => ({ ...p, pac: b.active }));
       } catch {
         /* переживаем */
       }
@@ -306,46 +332,57 @@ export function RouteMap({ onNavigate }: { onNavigate?: (v: AppView) => void }) 
   const poolTotal = health?.upstreams.length ?? 0;
   const poolOk = health ? health.upstreams.filter((u) => u.healthy).length : 0;
 
-  /* Позиции фиксированы: карта — схема, а не песочница. */
+  /* Выходы-ноды: топ-5 по задержке (активная — всегда в списке). */
+  const nodeExits = useMemo(() => {
+    const nodes = [...(live.ov?.nodes ?? [])].sort(
+      (a, b) => (live.pings?.[a.id] ?? 99999) - (live.pings?.[b.id] ?? 99999),
+    );
+    const top = nodes.slice(0, 5);
+    if (activeNode && !top.some((n) => n.id === activeNode.id)) top.unshift(activeNode);
+    return top.slice(0, 6);
+  }, [live.ov, live.pings, activeNode]);
+
   const initialNodes = useMemo<Node[]>(() => [
-    { id: "browsers", type: "browsers", position: { x: 0, y: 20 }, data: {} },
-    { id: "apps", type: "apps", position: { x: 0, y: 170 }, data: {} },
-    { id: "env", type: "env", position: { x: 0, y: 320 }, data: {} },
-    { id: "tunnel", type: "tunnel", position: { x: 300, y: 20 }, data: {} },
-    { id: "bridge", type: "bridge", position: { x: 300, y: 240 }, data: {} },
-    { id: "exit-node", type: "exit", position: { x: 600, y: 20 }, data: {} },
-    { id: "exit-direct", type: "exit", position: { x: 600, y: 190 }, data: {} },
-    { id: "exit-pool", type: "exit", position: { x: 600, y: 340 }, data: {} },
+    { id: "browsers", type: "browsers", position: { x: 0, y: 30 }, data: {} },
+    { id: "apps", type: "apps", position: { x: 0, y: 180 }, data: {} },
+    { id: "env", type: "env", position: { x: 0, y: 330 }, data: {} },
+    { id: "tunnel", type: "tunnel", position: { x: 300, y: 30 }, data: {} },
+    { id: "bridge", type: "bridge", position: { x: 300, y: 250 }, data: {} },
+    { id: "exit-direct", type: "exit", position: { x: 600, y: 30 }, data: {} },
+    { id: "exit-pool", type: "exit", position: { x: 600, y: 130 }, data: {} },
+    // node-выходы добавляются динамически ниже
   ], []);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
 
-  /* Живые данные → узлы (позиции и drag не трогаем). */
+  /* Живые данные → узлы. */
   useEffect(() => {
-    setNodes((prev) =>
-      prev.map((n) => {
-        if (n.id === "browsers") return { ...n, data: { live, envOn, active: !!live.sysProxy } };
-        if (n.id === "apps") return { ...n, data: { live, envOn, active: bridgeRunning } };
-        if (n.id === "env") return { ...n, data: { live, envOn, active: envOn } };
+    setNodes((prev) => {
+      const base = prev.filter((n) => !n.id.startsWith("node-"));
+      const exitNodes: Node[] = nodeExits.map((n, i) => ({
+        id: `node-${n.id}`,
+        type: "exit",
+        position: { x: 600, y: 240 + i * 78 },
+        data: {
+          live,
+          name: n.name,
+          flag: flagOf(n.name),
+          sub:
+            live.pings?.[n.id]
+              ? `${live.pings[n.id]} мс`
+              : "задержка не измерена",
+          active: n.id === live.ov?.active && vpnRunning,
+        },
+        deletable: false,
+      }));
+      const withData = base.map((n) => {
+        if (n.id === "browsers")
+          return { ...n, data: { live, active: live.sysProxy === true || live.pac === true } };
+        if (n.id === "apps") return { ...n, data: { live, active: bridgeRunning } };
+        if (n.id === "env") return { ...n, data: { live, active: envOn } };
         if (n.id === "tunnel") return { ...n, data: { live } };
         if (n.id === "bridge") return { ...n, data: { live, health } };
-        if (n.id === "exit-node")
-          return {
-            ...n,
-            data: {
-              live,
-              name: activeNode?.name ?? "Нода не выбрана",
-              flag: activeNode ? flagOf(activeNode.name) : "🌐",
-              sub: !vpnRunning
-                ? "туннель выключен"
-                : live.pings && activeNode && live.pings[activeNode.id]
-                  ? `${live.pings[activeNode.id]} мс · выход через ноду`
-                  : "выход через ноду",
-              active: vpnRunning,
-              problem: vpnRunning && !activeNode,
-            },
-          };
         if (n.id === "exit-direct")
           return {
             ...n,
@@ -364,86 +401,200 @@ export function RouteMap({ onNavigate }: { onNavigate?: (v: AppView) => void }) 
               live,
               name: `Прокси-пул${poolTotal ? ` · ${poolOk}/${poolTotal}` : ""}`,
               flag: "🛰️",
-              sub: poolTotal ? `${poolOk} живых из ${poolTotal}` : "пул пуст — добавь в «Прокси»",
+              sub: poolTotal ? `${poolOk} живых из ${poolTotal}` : "пул пуст",
               active: bridgeRunning && poolOk > 0,
               problem: bridgeRunning && poolTotal > 0 && poolOk === 0,
             },
           };
         return n;
-      }),
-    );
+      });
+      return [...withData, ...exitNodes];
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [live, envOn, health, busy, activeNode, vpnRunning, bridgeRunning, smart, poolTotal, poolOk]);
+  }, [live, envOn, health, nodeExits, vpnRunning, bridgeRunning, smart, poolTotal, poolOk]);
 
-  /* Рёбра: анимируются, когда по ним реально идёт трафик. */
+  /* ── Проводка: каждое ребро = реальное действие ── */
+  const act = async (fn: () => Promise<unknown>, okMsg?: string) => {
+    setBusy(true);
+    try {
+      await fn();
+      if (okMsg) flash(okMsg);
+    } catch (e) {
+      flash(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const connectToNode = async (nodeId: string) => {
+    await act(async () => {
+      let o = await vpnSetActive(nodeId);
+      if (o.process.running) {
+        o = await vpnStop();
+        o = await vpnStart();
+      }
+      setLive((p) => ({ ...p, ov: o }));
+    }, "нода переключена");
+  };
+
+  const onConnectEdge = (source: string, target: string) => {
+    if (busy) return;
+    if (source === "browsers" && target === "tunnel") return void act(() => vpnSystemProxySet(true), "браузеры → туннель");
+    if (source === "browsers" && target === "bridge") return void act(() => browsersEnable(), "браузеры → мост (PAC)");
+    if (source === "apps" && target === "bridge") return void act(() => shimStart(), "мост запущен");
+    if (source === "env" && target === "bridge") return void act(() => setGlobalProxyEnv(), "env → мост");
+    if (source === "bridge" && target === "exit-direct") return void act(() => bridgeSetRouteMode("smart"), "умная маршрутизация");
+    if (source === "bridge" && target === "exit-pool") return void act(() => shimStart(), "мост запущен");
+    if (source === "tunnel" && target.startsWith("node-")) return void connectToNode(target.slice(5));
+  };
+
+  /* Удаление ребра = выключить соответствующую проводку. */
+  const disconnectEdge = (edge: Edge) => {
+    const [ , s, ...rest ] = edge.id.split("-");
+    const source = s;
+    const target = rest.join("-");
+    if (source === "browsers" && target === "tunnel") return void act(() => vpnSystemProxySet(false));
+    if (source === "browsers" && target === "bridge") return void act(() => browsersDisable());
+    if (source === "env" && target === "bridge") return void act(() => clearGlobalProxyEnv());
+    if (source === "bridge" && target === "exit-direct") return void act(() => bridgeSetRouteMode("all"));
+    if ((source === "apps" && target === "bridge") || (source === "bridge" && target === "exit-pool"))
+      return void act(() => shimStop());
+    if (source === "tunnel" && target.startsWith("node-")) return void act(() => vpnStop());
+  };
+
+  /* Рёбра из реального состояния. */
   useEffect(() => {
     const mk = (id: string, source: string, target: string, on: boolean, label?: string): Edge => ({
       id,
       source,
       target,
       animated: on,
+      deletable: true,
       label,
       labelShowBg: true,
-      labelBgStyle: { fill: "var(--vb-surface, #14171c)", fillOpacity: 0.9 },
+      labelBgStyle: { fill: "#14171c", fillOpacity: 0.9 },
       labelBgPadding: [6, 3],
       labelBgBorderRadius: 6,
-      style: {
-        stroke: on ? "#34d399" : "var(--vb-border, #2a2f38)",
-        strokeWidth: on ? 2 : 1.4,
-      },
+      style: { stroke: on ? "#34d399" : "#2a2f38", strokeWidth: on ? 2 : 1.4 },
       markerEnd: on ? { type: MarkerType.ArrowClosed, color: "#34d399" } : undefined,
     });
-    setEdges([
-      mk("e-b", "browsers", "tunnel", !!live.sysProxy && vpnRunning, live.sysProxy ? "системный прокси" : undefined),
-      mk("e-a", "apps", "bridge", bridgeRunning),
-      mk("e-e", "env", "bridge", envOn && bridgeRunning),
-      mk("e-t", "tunnel", "exit-node", vpnRunning && !!activeNode),
-      mk("e-bd", "bridge", "exit-direct", bridgeRunning && smart),
-      mk("e-bp", "bridge", "exit-pool", bridgeRunning && poolOk > 0),
-    ]);
+    const list: Edge[] = [
+      mk("e-browsers-tunnel", "browsers", "tunnel", live.sysProxy === true && vpnRunning, live.sysProxy ? "системный прокси" : "проведи связь"),
+      mk("e-browsers-bridge", "browsers", "bridge", live.pac === true && bridgeRunning, live.pac ? "PAC" : undefined),
+      mk("e-apps-bridge", "apps", "bridge", bridgeRunning),
+      mk("e-env-bridge", "env", "bridge", envOn && bridgeRunning),
+      mk("e-bridge-direct", "bridge", "exit-direct", bridgeRunning && smart),
+      mk("e-bridge-pool", "bridge", "exit-pool", bridgeRunning && poolOk > 0),
+    ];
+    if (activeNode) {
+      list.push(mk(`e-tunnel-node-${activeNode.id}`, "tunnel", `node-${activeNode.id}`, vpnRunning));
+    }
+    setEdges(list);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [live.sysProxy, vpnRunning, bridgeRunning, envOn, smart, poolOk, activeNode]);
+  }, [live, vpnRunning, bridgeRunning, envOn, smart, poolOk, activeNode]);
 
-  /* Панель редактирования выбранного узла. */
   const selectedNode = nodes.find((n) => n.id === selected);
 
-  const switchNode = async (id: string) => {
+  const addNode = async () => {
+    const input = addText.trim();
+    if (!input) return;
     setBusy(true);
     try {
-      let o = await vpnSetActive(id);
-      if (o.process.running) {
-        o = await vpnStop();
-        o = await vpnStart();
-      }
+      const o = await vpnAddLink(input);
       setLive((p) => ({ ...p, ov: o }));
-    } catch {
-      /* переживаем */
+      flash("нода добавлена");
+      setAddText("");
+      setAddOpen(false);
+    } catch (e) {
+      flash(String(e));
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <div className="flex h-full gap-3">
+    <div className="relative flex h-full gap-3">
       <div className="min-w-0 flex-1 overflow-hidden rounded-xl border border-vb-border bg-vb-bg">
         <ReactFlow
           nodes={nodes}
           edges={edges}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
+          onConnect={(c) => c.source && c.target && onConnectEdge(c.source, c.target)}
+          onEdgesDelete={(eds) => eds.forEach(disconnectEdge)}
           nodeTypes={nodeTypes}
           onNodeClick={(_, n) => setSelected(n.id)}
           onPaneClick={() => setSelected(null)}
+          deleteKeyCode={["Backspace", "Delete"]}
           fitView
-          fitViewOptions={{ padding: 0.15 }}
+          fitViewOptions={{ padding: 0.12 }}
           proOptions={{ hideAttribution: true }}
-          nodesDraggable
-          edgesFocusable={false}
-          minZoom={0.5}
+          minZoom={0.4}
         >
-          <Background variant={BackgroundVariant.Dots} gap={22} size={1.4} color="var(--vb-border, #2a2f38)" />
+          <Background variant={BackgroundVariant.Dots} gap={22} size={1.4} color="#2a2f38" />
           <Controls showInteractive={false} position="bottom-right" />
+          <Panel position="top-right">
+            <div className="flex items-center gap-2">
+              {notice && (
+                <span className="rounded-lg border border-vb-border bg-vb-bg/95 px-3 py-1.5 text-[11px] text-vb-silver">
+                  {notice}
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={() => setAddOpen(true)}
+                className="flex items-center gap-1.5 rounded-lg border border-vb-border bg-vb-bg/95 px-3 py-1.5 text-[12px] font-medium text-vb-silver transition-colors hover:border-vb-border-strong hover:text-vb-fg"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Нода
+              </button>
+            </div>
+          </Panel>
         </ReactFlow>
+
+        {/* Диалог добавления ноды */}
+        <AnimatePresence>
+          {addOpen && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 z-20 flex items-center justify-center bg-black/50 p-6"
+              onMouseDown={(e) => e.target === e.currentTarget && setAddOpen(false)}
+            >
+              <motion.div
+                initial={{ scale: 0.96, y: 8 }}
+                animate={{ scale: 1, y: 0 }}
+                exit={{ scale: 0.96, y: 8 }}
+                className="w-full max-w-md rounded-xl border border-vb-border bg-vb-bg p-4 shadow-2xl"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-[14px] font-semibold text-vb-fg">Добавить ноду</span>
+                  <button type="button" onClick={() => setAddOpen(false)} className="rounded-lg p-1.5 text-vb-silver-dim hover:bg-vb-surface-2 hover:text-vb-silver">
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+                <textarea
+                  value={addText}
+                  onChange={(e) => setAddText(e.target.value)}
+                  placeholder={"vless://…\nvmess://…\nss://…\nили ссылка подписки https://…"}
+                  rows={5}
+                  autoFocus
+                  className="mt-3 w-full resize-none rounded-lg border border-vb-border bg-vb-surface p-3 font-mono text-[12px] text-vb-fg outline-none placeholder:text-vb-silver-faint focus:border-vb-emerald/50"
+                />
+                <button
+                  type="button"
+                  onClick={addNode}
+                  disabled={busy || !addText.trim()}
+                  className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg bg-vb-emerald px-3 py-2 text-[13px] font-semibold text-black transition-colors hover:bg-vb-emerald-bright disabled:opacity-40"
+                >
+                  <Plus className="h-4 w-4" />
+                  Добавить
+                </button>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       {/* ── Панель действий выбранного узла ── */}
@@ -461,38 +612,17 @@ export function RouteMap({ onNavigate }: { onNavigate?: (v: AppView) => void }) 
               live={live}
               busy={busy}
               health={health}
-              envOn={envOn}
-              onSwitchNode={switchNode}
-              onToggleSysProxy={async () => {
-                setBusy(true);
-                try {
-                  const v = await vpnSystemProxySet(!(live.sysProxy ?? false));
-                  setLive((p) => ({ ...p, sysProxy: v }));
-                } finally {
-                  setBusy(false);
-                }
-              }}
-              onToggleSmart={async () => {
-                setBusy(true);
-                try {
-                  if (live.ov) {
-                    await vpnSetRoute(live.ov.route_mode === "all" ? "smart" : "all", live.ov.whitelist_sites);
-                  } else {
-                    await bridgeSetRouteMode("all");
-                  }
-                } finally {
-                  setBusy(false);
-                }
-              }}
-              onPower={async () => {
-                setBusy(true);
-                try {
-                  const o = vpnRunning ? await vpnStop() : await vpnStart();
-                  setLive((p) => ({ ...p, ov: o }));
-                } finally {
-                  setBusy(false);
-                }
-              }}
+              onSwitchNode={connectToNode}
+              onToggleSysProxy={() => act(() => vpnSystemProxySet(!(live.sysProxy ?? false)))}
+              onTogglePac={() => act(() => (live.pac ? browsersDisable() : browsersEnable()))}
+              onToggleSmart={() =>
+                act(() =>
+                  live.ov
+                    ? vpnSetRoute(live.ov.route_mode === "all" ? "smart" : "all", live.ov.whitelist_sites)
+                    : bridgeSetRouteMode("all"),
+                )
+              }
+              onPower={() => act(() => (vpnRunning ? vpnStop() : vpnStart()))}
               onNavigate={(v) => {
                 setSelected(null);
                 onNavigate?.(v);
@@ -512,9 +642,9 @@ function MapPanel({
   live,
   busy,
   health,
-  envOn,
   onSwitchNode,
   onToggleSysProxy,
+  onTogglePac,
   onToggleSmart,
   onPower,
   onNavigate,
@@ -523,9 +653,9 @@ function MapPanel({
   live: MapData;
   busy: boolean;
   health: BridgeHealth | null;
-  envOn: boolean;
   onSwitchNode: (id: string) => void;
   onToggleSysProxy: () => void;
+  onTogglePac: () => void;
   onToggleSmart: () => void;
   onPower: () => void;
   onNavigate: (v: AppView) => void;
@@ -536,7 +666,6 @@ function MapPanel({
     env: "Система (env)",
     tunnel: "VPN-туннель",
     bridge: "Мост-диспетчер",
-    "exit-node": "Активная нода",
     "exit-direct": "Напрямую",
     "exit-pool": "Прокси-пул",
   };
@@ -552,14 +681,18 @@ function MapPanel({
     [live.ov, live.pings],
   );
 
+  const isNodeExit = id.startsWith("node-");
+
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center gap-2">
         <Zap className="h-4 w-4 text-vb-emerald" />
-        <span className="text-[14px] font-semibold text-vb-fg">{titles[id] ?? id}</span>
+        <span className="text-[14px] font-semibold text-vb-fg">
+          {isNodeExit ? (live.ov?.nodes.find((n) => `node-${n.id}` === id)?.name ?? "Нода") : (titles[id] ?? id)}
+        </span>
       </div>
 
-      {(id === "tunnel" || id === "exit-node") && (
+      {(id === "tunnel" || isNodeExit) && (
         <>
           <button type="button" className={btn} onClick={onPower} disabled={busy}>
             <Power className="h-3.5 w-3.5" />
@@ -592,10 +725,13 @@ function MapPanel({
       {id === "browsers" && (
         <>
           <p className="text-[12px] leading-relaxed text-vb-silver-dim">
-            Системный прокси отправляет Chrome, Edge и Opera через VPN-туннель. При падении туннеля отключается сам.
+            Проведи связь «Браузеры → VPN-туннель» (системный прокси) или «Браузеры → Мост» (PAC с правилами).
           </p>
           <button type="button" className={btn} onClick={onToggleSysProxy} disabled={busy || live.sysProxy === null}>
-            {live.sysProxy ? "Отключить прокси браузеров" : "Включить прокси браузеров"}
+            {live.sysProxy ? "Отключить прокси браузеров" : "Браузеры → VPN-туннель"}
+          </button>
+          <button type="button" className={btn} onClick={onTogglePac} disabled={busy || live.pac === null}>
+            {live.pac ? "Отключить PAC (мост)" : "Браузеры → Мост (PAC)"}
           </button>
         </>
       )}
@@ -627,15 +763,13 @@ function MapPanel({
 
       {id === "env" && (
         <p className="text-[12px] leading-relaxed text-vb-silver-dim">
-          {envOn
-            ? "Глобальные переменные HTTP_PROXY указывают на мост: консольные утилиты и часть приложений пойдут через его правила."
-            : "Переменные не заданы. Включи «Системное проксирование» в трее, если нужно направить консольные утилиты через мост."}
+          Проведи связь «Система → Мост», чтобы консольные утилиты шли через его правила. Снять связь — удалить ребро (Delete).
         </p>
       )}
 
       {id === "exit-direct" && (
         <p className="text-[12px] leading-relaxed text-vb-silver-dim">
-          RU-домены (Яндекс, VK, банки) ходят без прокси — быстро и без блокировок. Управляется режимом «Умный» на мосте.
+          RU-домены (Яндекс, VK, банки) ходят без прокси — быстро и без блокировок. Связь «Мост → Напрямую» = умная маршрутизация.
         </p>
       )}
 
