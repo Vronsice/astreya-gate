@@ -80,6 +80,7 @@ export type AppView =
   | "overview"
   | "proxies"
   | "vpn"
+  | "map"
   | "browsers"
   | "apps"
   | "guide"

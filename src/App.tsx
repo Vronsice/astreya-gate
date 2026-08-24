@@ -9,6 +9,7 @@ import { StepDone } from "./wizard/StepDone";
 import { Overview } from "./pages/Overview";
 import { Proxies } from "./pages/Proxies";
 import { Vpn } from "./pages/Vpn";
+import { RouteMapPage } from "./pages/RouteMap";
 import { Browsers } from "./pages/Browsers";
 import { Guide } from "./pages/Guide";
 import { Apps } from "./pages/Apps";
@@ -153,6 +154,8 @@ function App() {
                   <Proxies />
                 ) : view === "vpn" ? (
                   <Vpn />
+                ) : view === "map" ? (
+                  <RouteMapPage onNavigate={navigate} />
                 ) : view === "browsers" ? (
                   <Browsers />
                 ) : view === "apps" ? (

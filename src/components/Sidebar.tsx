@@ -7,6 +7,7 @@ import {
   House,
   LayoutGrid,
   Settings2,
+  Waypoints,
   Wifi,
 } from "lucide-react";
 import { StatusOrb } from "./StatusOrb";
@@ -19,6 +20,7 @@ export const NAV_ORDER: AppView[] = [
   "overview",
   "proxies",
   "vpn",
+  "map",
   "browsers",
   "apps",
   "guide",
@@ -29,6 +31,7 @@ export const NAV_ORDER: AppView[] = [
 const NAV_ITEMS: { id: AppView; label: string; icon: typeof LayoutGrid }[] = [
   { id: "proxies", label: "Прокси", icon: Globe },
   { id: "vpn", label: "VPN", icon: Wifi },
+  { id: "map", label: "Карта", icon: Waypoints },
   { id: "browsers", label: "Браузеры", icon: Compass },
   { id: "apps", label: "Приложения", icon: AppWindow },
   { id: "guide", label: "Гид", icon: BookOpen },
