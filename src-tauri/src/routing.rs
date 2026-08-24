@@ -23,6 +23,8 @@ pub const PROFILE_SCHEMA: u32 = 1;
 pub enum ExitRef {
     Direct,
     Node { id: String },
+    /// Селектор активной ноды (переключается через clash-api на лету).
+    Selector,
     Reject,
 }
 
@@ -77,6 +79,10 @@ pub struct RoutingProfile {
     /// Доступные ноды-выходы.
     #[serde(default)]
     pub nodes: Vec<NodeExit>,
+    /// Selector-outbound «proxy» поверх всех нод: переключение активной
+    /// ноды через clash-api БЕЗ перезапуска туннеля.
+    #[serde(default)]
+    pub selector: bool,
 }
 
 impl RoutingProfile {
@@ -88,6 +94,7 @@ impl RoutingProfile {
             rules: Vec::new(),
             default_exit: ExitRef::Direct,
             nodes: Vec::new(),
+            selector: false,
         }
     }
 }
@@ -96,12 +103,13 @@ impl RoutingProfile {
 
 /// Тег outbound для выхода. Одиночная нода получает легаси-тег «proxy» —
 /// так конфиг остаётся совместим с существующими проверками/метриками.
-fn exit_tag(exit: &ExitRef, single_node: bool) -> Result<String, String> {
+fn exit_tag(exit: &ExitRef, single: bool) -> Result<String, String> {
     match exit {
         ExitRef::Direct => Ok(String::from("direct")),
         ExitRef::Reject => Err("reject не может быть выходом маршрута по умолчанию".into()),
+        ExitRef::Selector => Err("Selector допустим только в правилах (rule_tag)".into()),
         ExitRef::Node { id } => {
-            if single_node {
+            if single {
                 Ok(String::from("proxy"))
             } else {
                 Ok(format!("node-{id}"))
@@ -122,8 +130,19 @@ pub fn compile(profile: &RoutingProfile, clash_api_port: u16) -> Result<serde_js
         return Err("профиль не содержит ни одного входа (mixed/tun)".into());
     }
 
-    // Ноды → outbounds. Идентификаторы уникальны.
     let single = profile.nodes.len() == 1;
+    let selector_mode = profile.selector && !profile.nodes.is_empty();
+    // Тег ноды: в selector-режиме всегда явный «node-<id>» (селектор
+    // называется «proxy»); без селектора одиночная нода — легаси «proxy».
+    let node_tag = |id: &str| -> String {
+        if !selector_mode && single {
+            String::from("proxy")
+        } else {
+            format!("node-{id}")
+        }
+    };
+
+    // Ноды → outbounds. Идентификаторы уникальны.
     let mut known: Vec<String> = Vec::new();
     let mut outbounds: Vec<serde_json::Value> = Vec::new();
     for n in &profile.nodes {
@@ -134,21 +153,50 @@ pub fn compile(profile: &RoutingProfile, clash_api_port: u16) -> Result<serde_js
         let parsed = crate::vpn::parse_link(&n.link)
             .map_err(|e| format!("нода «{}»: {e}", n.name))?;
         let mut o = parsed.outbound;
-        o["tag"] = serde_json::json!(exit_tag(
-            &ExitRef::Node { id: n.id.clone() },
-            single
-        )?);
+        o["tag"] = serde_json::json!(node_tag(&n.id));
         outbounds.push(o);
+    }
+    if selector_mode {
+        let mut sel = serde_json::json!({
+            "type": "selector",
+            "tag": "proxy",
+            "outbounds": known.iter().map(|id| node_tag(id)).collect::<Vec<_>>(),
+        });
+        if let ExitRef::Node { id } = &profile.default_exit {
+            sel["default"] = serde_json::json!(node_tag(id));
+        }
+        outbounds.insert(0, sel);
     }
     outbounds.push(serde_json::json!({ "type": "direct", "tag": "direct" }));
 
-    let resolve = |exit: &ExitRef| -> Result<String, String> { exit_tag(exit, single) };
+    // Правила указывают на КОНКРЕТНУЮ ноду (мимо селектора) либо на селектор.
+    let rule_tag = |exit: &ExitRef| -> Result<String, String> {
+        match exit {
+            ExitRef::Selector => {
+                if selector_mode {
+                    Ok(String::from("proxy"))
+                } else if let Some(ExitRef::Node { id }) = Some(&profile.default_exit) {
+                    Ok(node_tag(id))
+                } else {
+                    Err("Selector-выход без нод в профиле".into())
+                }
+            }
+            ExitRef::Node { id } => Ok(node_tag(id)),
+            other => exit_tag(other, single),
+        }
+    };
     // Валидация ссылок на ноды.
     for r in &profile.rules {
-        if let ExitRef::Node { id } = &r.exit {
-            if !known.contains(id) {
-                return Err(format!("правило ссылается на несуществующую ноду «{id}»"));
+        match &r.exit {
+            ExitRef::Node { id } => {
+                if !known.contains(id) {
+                    return Err(format!("правило ссылается на несуществующую ноду «{id}»"));
+                }
             }
+            ExitRef::Selector if !selector_mode => {
+                return Err("Selector-выход требует selector: true и хотя бы одну ноду".into());
+            }
+            _ => {}
         }
     }
     if let ExitRef::Node { id } = &profile.default_exit {
@@ -156,7 +204,11 @@ pub fn compile(profile: &RoutingProfile, clash_api_port: u16) -> Result<serde_js
             return Err(format!("default_exit ссылается на несуществующую ноду «{id}»"));
         }
     }
-    let final_tag = resolve(&profile.default_exit)?;
+    let final_tag = match &profile.default_exit {
+        // В selector-режиме default идёт через селектор — его и переключаем.
+        ExitRef::Node { .. } if selector_mode => String::from("proxy"),
+        other => exit_tag(other, single)?,
+    };
 
     // Входы.
     let mut inbounds: Vec<serde_json::Value> = Vec::new();
@@ -208,7 +260,7 @@ pub fn compile(profile: &RoutingProfile, clash_api_port: u16) -> Result<serde_js
                 obj.insert("action".into(), serde_json::json!("reject"));
             }
             exit => {
-                obj.insert("outbound".into(), serde_json::json!(resolve(exit)?));
+                obj.insert("outbound".into(), serde_json::json!(rule_tag(exit)?));
             }
         }
         rules.push(serde_json::Value::Object(obj));
@@ -220,9 +272,13 @@ pub fn compile(profile: &RoutingProfile, clash_api_port: u16) -> Result<serde_js
 
     // DNS нужен только TUN-профилям (в mixed-режиме резолвит приложение).
     let dns = if profile.inbounds.tun {
-        let remote_detour = match &profile.default_exit {
-            ExitRef::Node { .. } => final_tag.clone(),
-            _ => String::from("direct"),
+        let remote_detour = if selector_mode {
+            String::from("proxy")
+        } else {
+            match &profile.default_exit {
+                ExitRef::Node { .. } => final_tag.clone(),
+                _ => String::from("direct"),
+            }
         };
         Some(serde_json::json!({
             // Новый формат DNS (sing-box 1.12+).
@@ -268,6 +324,72 @@ pub fn compile(profile: &RoutingProfile, clash_api_port: u16) -> Result<serde_js
 }
 
 // ─── Мост из легаси-мира ─────────────────────────────────────────
+
+/// Профиль из всех нод + активной (живой путь, Фаза B): selector-режим
+/// даёт мгновенное переключение нод через clash-api без рестарта.
+pub fn profile_from_nodes(
+    name: impl Into<String>,
+    nodes: Vec<NodeExit>,
+    active_id: Option<String>,
+    mixed_port: Option<u16>,
+    tun: bool,
+    mode: crate::vpn::TunnelRoute,
+    whitelist: Vec<String>,
+) -> RoutingProfile {
+    let mut p = RoutingProfile::new(name);
+    p.inbounds = InboundsSpec { mixed_port, tun };
+    p.nodes = nodes;
+    p.selector = true;
+    match active_id {
+        Some(id) if p.nodes.iter().any(|n| n.id == id) => {
+            p.default_exit = ExitRef::Node { id };
+        }
+        _ => {
+            // Активной нет/не в списке: дефолт — первая нода, иначе direct.
+            p.default_exit = p
+                .nodes
+                .first()
+                .map(|n| ExitRef::Node { id: n.id.clone() })
+                .unwrap_or(ExitRef::Direct);
+        }
+    }
+    // Whitelist-режим: мимо списка — напрямую (как в легаси).
+    if mode == crate::vpn::TunnelRoute::Whitelist {
+        p.default_exit = ExitRef::Direct;
+    }
+    apply_legacy_route_mode(&mut p, mode, whitelist);
+    p
+}
+
+/// Накатить правила легаси-режима маршрутизации (умный/белый список).
+fn apply_legacy_route_mode(p: &mut RoutingProfile, mode: crate::vpn::TunnelRoute, whitelist: Vec<String>) {
+    match mode {
+        crate::vpn::TunnelRoute::Smart => {
+            p.rules.push(Rule {
+                name: Some(String::from("ru-direct")),
+                matcher: RuleMatch::DomainSuffix {
+                    list: crate::vpn::SMART_DIRECT_DOMAINS
+                        .iter()
+                        .map(|d| d.to_string())
+                        .collect(),
+                },
+                exit: ExitRef::Direct,
+            });
+        }
+        crate::vpn::TunnelRoute::Whitelist => {
+            if !whitelist.is_empty() {
+                // В whitelist-режиме через ноду идёт только список;
+                // выход — селектор (активная нода переключается на лету).
+                p.rules.push(Rule {
+                    name: Some(String::from("whitelist-proxy")),
+                    matcher: RuleMatch::DomainSuffix { list: whitelist },
+                    exit: ExitRef::Selector,
+                });
+            }
+        }
+        crate::vpn::TunnelRoute::All => {}
+    }
+}
 
 /// Собрать профиль, эквивалентный текущему императивному поведению
 /// (build_config / build_config_tun): одна активная нода + режим маршрута.
@@ -344,6 +466,68 @@ mod tests {
 
     fn compile_ok(p: &RoutingProfile) -> serde_json::Value {
         compile(p, 9090).expect("компиляция профиля")
+    }
+
+    #[test]
+    fn golden_selector_multi_node() {
+        let p = profile_from_nodes(
+            "live",
+            vec![node("n1", LINK1), node("n2", LINK2)],
+            Some(String::from("n2")),
+            Some(2080),
+            false,
+            crate::vpn::TunnelRoute::All,
+            vec![],
+        );
+        assert!(p.selector);
+        let cfg = compile_ok(&p);
+        golden("selector_multi_node", &cfg);
+
+        let outs = cfg["outbounds"].as_array().unwrap();
+        assert_eq!(outs[0]["type"], "selector");
+        assert_eq!(outs[0]["tag"], "proxy");
+        assert_eq!(outs[0]["default"], "node-n2");
+        assert_eq!(outs[0]["outbounds"][0], "node-n1");
+        assert_eq!(cfg["route"]["final"], "proxy");
+        // Правила мимо селектора не ходят — их тут нет (All), но инвариант
+        // фиксируем: если правила есть, их outbound — direct или node-*.
+        if let Some(rules) = cfg["route"]["rules"].as_array() {
+            for r in rules {
+                if let Some(o) = r.get("outbound") {
+                    assert!(o == "direct" || o.as_str().unwrap().starts_with("node-"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn selector_fallbacks() {
+        // Активной нет в списке → дефолт первая нода.
+        let p = profile_from_nodes(
+            "fb",
+            vec![node("n1", LINK1), node("n2", LINK2)],
+            Some(String::from("ghost")),
+            Some(2080),
+            false,
+            crate::vpn::TunnelRoute::All,
+            vec![],
+        );
+        assert_eq!(p.default_exit, ExitRef::Node { id: "n1".into() });
+
+        // Whitelist-режим: default direct, правило через селектор.
+        let p = profile_from_nodes(
+            "wl",
+            vec![node("n1", LINK1)],
+            Some(String::from("n1")),
+            Some(2080),
+            false,
+            crate::vpn::TunnelRoute::Whitelist,
+            vec!["example.com".into()],
+        );
+        assert_eq!(p.default_exit, ExitRef::Direct);
+        let cfg = compile_ok(&p);
+        assert_eq!(cfg["route"]["final"], "direct");
+        assert_eq!(cfg["route"]["rules"][0]["outbound"], "proxy");
     }
 
     #[test]

@@ -428,11 +428,9 @@ function RouteMap({ onNavigate }: { onNavigate?: (v: AppView) => void }) {
 
   const connectToNode = async (nodeId: string) => {
     await act(async () => {
-      let o = await vpnSetActive(nodeId);
-      if (o.process.running) {
-        o = await vpnStop();
-        o = await vpnStart();
-      }
+      // Бэкенд сам переключает селектор на лету (без рестарта туннеля),
+      // при недоступности — рестартит. Здесь только фиксируем результат.
+      const o = await vpnSetActive(nodeId);
       setLive((p) => ({ ...p, ov: o }));
     }, "нода переключена");
   };

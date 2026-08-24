@@ -1027,6 +1027,74 @@ pub fn start(active_node_link: &str, port: u16) -> Result<String, String> {
     )
 }
 
+/// Собрать профиль из ВСЕХ валидных нод (selector-режим: мгновенное
+/// переключение активной через clash-api) и скомпилировать конфиг.
+fn compile_live_config(
+    port: Option<u16>,
+    tun: bool,
+    mode: TunnelRoute,
+    whitelist: &[String],
+    active_node_link: &str,
+) -> Result<(serde_json::Value, String), String> {
+    let s = crate::settings::load();
+    let mut nodes: Vec<crate::routing::NodeExit> = Vec::new();
+    for n in &s.vpn_nodes {
+        // Битые ссылки пропускаем — профиль собирается из живых.
+        if parse_link(&n.link).is_ok() {
+            nodes.push(crate::routing::NodeExit {
+                id: n.id.clone(),
+                name: n.name.clone(),
+                link: n.link.clone(),
+            });
+        }
+    }
+    // Активная: по id из настроек, иначе по переданной ссылке.
+    let mut active_id = s.vpn_active.clone();
+    if !active_id
+        .as_deref()
+        .map(|id| nodes.iter().any(|n| n.id == id))
+        .unwrap_or(false)
+    {
+        active_id = s
+            .vpn_nodes
+            .iter()
+            .find(|n| n.link == active_node_link)
+            .map(|n| n.id.clone());
+    }
+    let mut active_name = String::from("нода");
+    if !active_id
+        .as_deref()
+        .map(|id| nodes.iter().any(|n| n.id == id))
+        .unwrap_or(false)
+    {
+        // Ручная ссылка, которой нет в списке, — добавляем как отдельный выход.
+        let parsed = parse_link(active_node_link)?;
+        active_name = parsed.name.clone();
+        nodes.push(crate::routing::NodeExit {
+            id: String::from("active"),
+            name: parsed.name,
+            link: active_node_link.to_string(),
+        });
+        active_id = Some(String::from("active"));
+    } else if let Some(id) = &active_id {
+        if let Some(n) = s.vpn_nodes.iter().find(|n| &n.id == id) {
+            active_name = n.name.clone();
+        }
+    }
+
+    let profile = crate::routing::profile_from_nodes(
+        String::from("live"),
+        nodes,
+        active_id,
+        port,
+        tun,
+        mode,
+        whitelist.to_vec(),
+    );
+    let cfg = crate::routing::compile(&profile, CLASH_API_PORT)?;
+    Ok((cfg, active_name))
+}
+
 /// То же с явными параметрами маршрутизации (команды UI передают свежие).
 pub fn start_routed(
     active_node_link: &str,
@@ -1050,8 +1118,8 @@ pub fn start_routed(
     }
     // Перезапуск поверх живого процесса — сначала стоп.
     stop();
-    let parsed = parse_link(active_node_link)?;
-    let cfg = build_config(parsed.outbound, port, mode, whitelist)?;
+    let (cfg, active_name) =
+        compile_live_config(Some(port), false, mode, whitelist, active_node_link)?;
     let dir = config_dir()?;
     let cfg_path = dir.join("config.json");
     let text = serde_json::to_string_pretty(&cfg).map_err(|e| format!("serialize: {e}"))?;
@@ -1084,7 +1152,7 @@ pub fn start_routed(
         )
         .is_ok()
         {
-            return Ok(parsed.name);
+            return Ok(active_name);
         }
     }
     Err("sing-box поднялся, но порт не открылся за 6с (нода недоступна или параметры неверны)".into())
@@ -1115,6 +1183,43 @@ pub fn stop() -> usize {
 }
 
 // ─── Мониторинг (clash_api) ──────────────────────────────────────
+
+/// Мгновенное переключение активной ноды через selector (clash-api),
+/// без перезапуска туннеля. Работает, если конфиг собран компилятором
+/// в selector-режиме; иначе вызывающий делает фолбэк на рестарт.
+pub async fn switch_node_live(node_id: &str) -> Result<(), String> {
+    let tag = format!("node-{node_id}");
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(4))
+        .build()
+        .map_err(|e| format!("client: {e}"))?;
+    let base = format!("http://127.0.0.1:{CLASH_API_PORT}/proxies/proxy");
+    let resp = client
+        .put(&base)
+        .json(&serde_json::json!({ "name": tag }))
+        .send()
+        .await
+        .map_err(|e| format!("clash-api недоступна: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("clash-api: HTTP {}", resp.status()));
+    }
+    // Проверяем, что селектор реально переключился.
+    let v: serde_json::Value = client
+        .get(&base)
+        .send()
+        .await
+        .map_err(|e| format!("clash-api: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("clash-api: {e}"))?;
+    let now = v.get("now").and_then(|x| x.as_str()).unwrap_or("");
+    if now == tag {
+        Ok(())
+    } else {
+        Err(format!("селектор не переключился (now={now})"))
+    }
+}
 
 /// Суммарный трафик из /connections: байт всего upload/download с запуска.
 #[derive(Debug, Clone, Serialize)]
@@ -1511,11 +1616,12 @@ fn exe_path_any() -> Result<std::path::PathBuf, String> {
 
 pub fn write_tun_config(link: &str) -> Result<std::path::PathBuf, String> {
     let s = crate::settings::load();
-    let parsed = parse_link(link)?;
-    let cfg = build_config_tun(
-        parsed.outbound,
+    let (cfg, _) = compile_live_config(
+        None,
+        true,
         TunnelRoute::from_str(&s.vpn_route_mode),
         &s.vpn_whitelist_sites,
+        link,
     )?;
     let dir = config_dir()?;
     let path = dir.join("config-tun.json");

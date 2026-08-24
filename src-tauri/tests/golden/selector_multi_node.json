@@ -1,0 +1,77 @@
+{
+  "experimental": {
+    "clash_api": {
+      "external_controller": "127.0.0.1:9090"
+    }
+  },
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "listen_port": 2080,
+      "tag": "mixed-in",
+      "type": "mixed"
+    }
+  ],
+  "log": {
+    "level": "error"
+  },
+  "outbounds": [
+    {
+      "default": "node-n2",
+      "outbounds": [
+        "node-n1",
+        "node-n2"
+      ],
+      "tag": "proxy",
+      "type": "selector"
+    },
+    {
+      "flow": "xtls-rprx-vision",
+      "server": "assets-edge.example.net",
+      "server_port": 443,
+      "tag": "node-n1",
+      "tls": {
+        "enabled": true,
+        "reality": {
+          "enabled": true,
+          "public_key": "x",
+          "short_id": ""
+        },
+        "server_name": "www.microsoft.com",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        }
+      },
+      "type": "vless",
+      "uuid": "e3fe2352-6c44-43a6-82da-06d177029abd"
+    },
+    {
+      "server": "hub.example.net",
+      "server_port": 443,
+      "tag": "node-n2",
+      "tls": {
+        "enabled": true,
+        "reality": {
+          "enabled": true,
+          "public_key": "y",
+          "short_id": ""
+        },
+        "server_name": "yahoo.com",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        }
+      },
+      "type": "vless",
+      "uuid": "11111111-2222-3333-4444-555555555555"
+    },
+    {
+      "tag": "direct",
+      "type": "direct"
+    }
+  ],
+  "route": {
+    "final": "proxy"
+  }
+}

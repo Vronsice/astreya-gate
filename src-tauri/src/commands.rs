@@ -1796,20 +1796,27 @@ pub async fn vpn_remove_node(id: String) -> Result<VpnOverview, String> {
 pub async fn vpn_set_active(id: Option<String>) -> Result<VpnOverview, String> {
     settings::set_vpn_active(id)?;
     let s = settings::load();
-    // Если движок уже работал — сразу перезапускаем на новую ноду.
+    // Если туннель уже работает — мгновенное переключение через селектор
+    // clash-api (без разрыва соединений). Фолбэк — рестарт туннеля.
     if crate::vpn::process_status().running {
-        if let (Some(active_id), Some(node)) = (
-            s.vpn_active.clone(),
-            s.vpn_nodes
-                .iter()
-                .find(|n| Some(n.id.as_str()) == s.vpn_active.as_deref()),
-        ) {
-            let _ = active_id;
-            let link = node.link.clone();
-            let port = s.vpn_port;
-            tokio::task::spawn_blocking(move || crate::vpn::start(&link, port))
-                .await
-                .map_err(|e| format!("Внутренняя ошибка: {e}"))??;
+        if let Some(active_id) = s.vpn_active.clone() {
+            match crate::vpn::switch_node_live(&active_id).await {
+                Ok(()) => {}
+                Err(e) => {
+                    tracing::warn!("live-switch не удался ({e}) — рестарт туннеля");
+                    if let Some(node) = s
+                        .vpn_nodes
+                        .iter()
+                        .find(|n| Some(n.id.as_str()) == s.vpn_active.as_deref())
+                    {
+                        let link = node.link.clone();
+                        let port = s.vpn_port;
+                        tokio::task::spawn_blocking(move || crate::vpn::start(&link, port))
+                            .await
+                            .map_err(|e| format!("Внутренняя ошибка: {e}"))??;
+                    }
+                }
+            }
         }
     }
     Ok(vpn_overview().await?)
