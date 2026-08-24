@@ -231,6 +231,28 @@ export interface BrowserStatus {
   pac_path?: string;
 }
 
+// ─── VPN: правила маршрутизации (RoutingProfile) ─────────────────
+
+export type RuleExit =
+  | { type: "direct" }
+  | { type: "node"; id: string }
+  | { type: "pool" }
+  | { type: "selector" }
+  | { type: "reject" };
+
+export type RuleMatch =
+  | { match: "domain_suffix"; list: string[] }
+  | { match: "domain_keyword"; list: string[] }
+  | { match: "process_name"; list: string[] }
+  | { match: "any" };
+
+/** Зеркало routing::Rule (Rust). */
+export interface RoutingRule {
+  name?: string;
+  match: RuleMatch;
+  exit: RuleExit;
+}
+
 // ─── VPN (sing-box) ──────────────────────────────────────────────
 
 export interface VpnSubscription {

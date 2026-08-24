@@ -1082,7 +1082,7 @@ fn compile_live_config(
         }
     }
 
-    let profile = crate::routing::profile_from_nodes(
+    let mut profile = crate::routing::profile_from_nodes(
         String::from("live"),
         nodes,
         active_id,
@@ -1091,6 +1091,29 @@ fn compile_live_config(
         mode,
         whitelist.to_vec(),
     );
+    // Пул прокси → urltest-группа «pool» (доступна правилам).
+    profile.pool = s
+        .proxies
+        .iter()
+        .enumerate()
+        .filter_map(|(i, url)| {
+            let pc = crate::proxy::parse(url).ok()?;
+            Some(crate::routing::Upstream {
+                id: format!("p{i}"),
+                proto: if url.starts_with("socks") {
+                    String::from("socks")
+                } else {
+                    String::from("http")
+                },
+                server: pc.host,
+                server_port: pc.port,
+                username: pc.username,
+                password: pc.password,
+            })
+        })
+        .collect();
+    // Пользовательские правила (per-app и др.) — поверх легаси-режима.
+    profile.rules.extend(s.vpn_rules.clone());
     let cfg = crate::routing::compile(&profile, CLASH_API_PORT)?;
     Ok((cfg, active_name))
 }

@@ -1,6 +1,6 @@
 [package]
 name = "astreya-gate"
-version = "1.3.0"
+version = "1.4.0"
 description = "Astreya Gate: proxy & routing hub for AI apps and beyond"
 authors = ["vronsice"]
 edition = "2021"

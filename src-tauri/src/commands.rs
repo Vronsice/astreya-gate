@@ -1822,6 +1822,55 @@ pub async fn vpn_set_active(id: Option<String>) -> Result<VpnOverview, String> {
     Ok(vpn_overview().await?)
 }
 
+// ─── VPN: пользовательские правила маршрутизации ────────────────
+
+#[tauri::command]
+pub fn vpn_rules_get() -> Vec<crate::routing::Rule> {
+    settings::load().vpn_rules
+}
+
+/// Добавить/заменить правило (по имени). Если туннель работает —
+/// перезапускает его, чтобы правило вступило в силу (конфиг перекомпилируется).
+#[tauri::command]
+pub async fn vpn_rule_save(rule: crate::routing::Rule) -> Result<Vec<crate::routing::Rule>, String> {
+    let mut s = settings::load();
+    if let Some(existing) = s.vpn_rules.iter_mut().find(|r| r.name == rule.name) {
+        *existing = rule.clone();
+    } else {
+        s.vpn_rules.push(rule.clone());
+    }
+    settings::set_vpn_rules(s.vpn_rules.clone())?;
+    restart_vpn_if_running().await?;
+    Ok(settings::load().vpn_rules)
+}
+
+#[tauri::command]
+pub async fn vpn_rule_remove(name: String) -> Result<Vec<crate::routing::Rule>, String> {
+    let mut s = settings::load();
+    s.vpn_rules.retain(|r| r.name.as_deref() != Some(name.as_str()));
+    settings::set_vpn_rules(s.vpn_rules.clone())?;
+    restart_vpn_if_running().await?;
+    Ok(settings::load().vpn_rules)
+}
+
+async fn restart_vpn_if_running() -> Result<(), String> {
+    if crate::vpn::process_status().running {
+        let s = settings::load();
+        if let Some(node) = s
+            .vpn_nodes
+            .iter()
+            .find(|n| Some(n.id.as_str()) == s.vpn_active.as_deref())
+        {
+            let link = node.link.clone();
+            let port = s.vpn_port;
+            tokio::task::spawn_blocking(move || crate::vpn::start(&link, port))
+                .await
+                .map_err(|e| format!("Внутренняя ошибка: {e}"))??;
+        }
+    }
+    Ok(())
+}
+
 /// Старт/стоп движка на активной ноде.
 #[tauri::command]
 pub async fn vpn_start() -> Result<VpnOverview, String> {

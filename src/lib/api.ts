@@ -16,6 +16,7 @@ import type {
   ProxyConfig,
   ProxyPing,
   PythonInfo,
+  RoutingRule,
   ShimStatus,
   ShimTestResult,
   ShortcutTarget,
@@ -382,6 +383,21 @@ export async function vpnSystemProxySet(v: boolean): Promise<boolean> {
 
 export async function vpnSystemProxyGet(): Promise<boolean> {
   return invoke<boolean>("vpn_system_proxy_get");
+}
+
+// ─── VPN: пользовательские правила маршрутизации ─────────────────
+
+export async function vpnRulesGet(): Promise<RoutingRule[]> {
+  return invoke<RoutingRule[]>("vpn_rules_get");
+}
+
+/** Добавить/заменить правило (по имени). Туннель перезапустится сам. */
+export async function vpnRuleSave(rule: RoutingRule): Promise<RoutingRule[]> {
+  return invoke<RoutingRule[]>("vpn_rule_save", { rule });
+}
+
+export async function vpnRuleRemove(name: string): Promise<RoutingRule[]> {
+  return invoke<RoutingRule[]>("vpn_rule_remove", { name });
 }
 
 // ─── Окна (для трей-попапа) ──────────────────────────────────────

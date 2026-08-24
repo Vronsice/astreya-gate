@@ -23,6 +23,8 @@ pub const PROFILE_SCHEMA: u32 = 1;
 pub enum ExitRef {
     Direct,
     Node { id: String },
+    /// Группа прокси-пула (urltest: автоматически самый быстрый живой).
+    Pool,
     /// Селектор активной ноды (переключается через clash-api на лету).
     Selector,
     Reject,
@@ -65,6 +67,20 @@ pub struct NodeExit {
     pub link: String,
 }
 
+/// Upstream прокси-пула (из раздела «Прокси»).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Upstream {
+    pub id: String,
+    /// "http" | "socks"
+    pub proto: String,
+    pub server: String,
+    pub server_port: u16,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub username: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub password: String,
+}
+
 /// Профиль маршрутизации — единый источник правды control plane.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoutingProfile {
@@ -79,6 +95,9 @@ pub struct RoutingProfile {
     /// Доступные ноды-выходы.
     #[serde(default)]
     pub nodes: Vec<NodeExit>,
+    /// Прокси-пул (urltest-группа: авто-выбор самого быстрого живого).
+    #[serde(default)]
+    pub pool: Vec<Upstream>,
     /// Selector-outbound «proxy» поверх всех нод: переключение активной
     /// ноды через clash-api БЕЗ перезапуска туннеля.
     #[serde(default)]
@@ -94,6 +113,7 @@ impl RoutingProfile {
             rules: Vec::new(),
             default_exit: ExitRef::Direct,
             nodes: Vec::new(),
+            pool: Vec::new(),
             selector: false,
         }
     }
@@ -108,6 +128,7 @@ fn exit_tag(exit: &ExitRef, single: bool) -> Result<String, String> {
         ExitRef::Direct => Ok(String::from("direct")),
         ExitRef::Reject => Err("reject не может быть выходом маршрута по умолчанию".into()),
         ExitRef::Selector => Err("Selector допустим только в правилах (rule_tag)".into()),
+        ExitRef::Pool => Err("Pool допустим только в правилах (rule_tag)".into()),
         ExitRef::Node { id } => {
             if single {
                 Ok(String::from("proxy"))
@@ -169,7 +190,37 @@ pub fn compile(profile: &RoutingProfile, clash_api_port: u16) -> Result<serde_js
     }
     outbounds.push(serde_json::json!({ "type": "direct", "tag": "direct" }));
 
-    // Правила указывают на КОНКРЕТНУЮ ноду (мимо селектора) либо на селектор.
+    // Пул: upstream-outbounds + urltest-группа «pool» (авто-быстрейший).
+    if !profile.pool.is_empty() {
+        let mut pool_tags = Vec::new();
+        for u in &profile.pool {
+            let mut o = serde_json::json!({
+                "type": u.proto,
+                "tag": format!("pool-{}", u.id),
+                "server": u.server,
+                "server_port": u.server_port,
+            });
+            if !u.username.is_empty() {
+                o["username"] = serde_json::json!(u.username);
+                o["password"] = serde_json::json!(u.password);
+            }
+            pool_tags.push(format!("pool-{}", u.id));
+            outbounds.push(o);
+        }
+        outbounds.insert(
+            outbounds.len() - 1,
+            serde_json::json!({
+                "type": "urltest",
+                "tag": "pool",
+                "outbounds": pool_tags,
+                "url": "https://www.gstatic.com/generate_204",
+                "interval": "5m",
+                "tolerance": 50
+            }),
+        );
+    }
+
+    // Правила указывают на КОНКРЕТНУЮ ноду (мимо селектора), пул или селектор.
     let rule_tag = |exit: &ExitRef| -> Result<String, String> {
         match exit {
             ExitRef::Selector => {
@@ -179,6 +230,13 @@ pub fn compile(profile: &RoutingProfile, clash_api_port: u16) -> Result<serde_js
                     Ok(node_tag(id))
                 } else {
                     Err("Selector-выход без нод в профиле".into())
+                }
+            }
+            ExitRef::Pool => {
+                if profile.pool.is_empty() {
+                    Err("Pool-выход, но пул в профиле пуст".into())
+                } else {
+                    Ok(String::from("pool"))
                 }
             }
             ExitRef::Node { id } => Ok(node_tag(id)),
@@ -195,6 +253,9 @@ pub fn compile(profile: &RoutingProfile, clash_api_port: u16) -> Result<serde_js
             }
             ExitRef::Selector if !selector_mode => {
                 return Err("Selector-выход требует selector: true и хотя бы одну ноду".into());
+            }
+            ExitRef::Pool if profile.pool.is_empty() => {
+                return Err("Pool-выход, но пул в профиле пуст".into());
             }
             _ => {}
         }
@@ -631,6 +692,46 @@ mod tests {
         assert_eq!(rules[1]["action"], "hijack-dns");
         assert_eq!(rules.last().unwrap()["ip_is_private"], true);
         assert_eq!(cfg["route"]["auto_detect_interface"], true);
+    }
+
+    #[test]
+    fn pool_urltest_group() {
+        let mut p = profile_from_nodes(
+            "pool",
+            vec![node("n1", LINK1)],
+            Some(String::from("n1")),
+            Some(2080),
+            false,
+            crate::vpn::TunnelRoute::All,
+            vec![],
+        );
+        p.pool = vec![
+            Upstream { id: "p0".into(), proto: "http".into(), server: "1.2.3.4".into(), server_port: 8080, username: "u".into(), password: "p".into() },
+            Upstream { id: "p1".into(), proto: "socks".into(), server: "5.6.7.8".into(), server_port: 1080, username: String::new(), password: String::new() },
+        ];
+        p.rules.push(Rule {
+            name: Some("apps-via-pool".into()),
+            matcher: RuleMatch::ProcessName { list: vec!["python.exe".into()] },
+            exit: ExitRef::Pool,
+        });
+        let cfg = compile_ok(&p);
+
+        let outs = cfg["outbounds"].as_array().unwrap();
+        let pool_group = outs.iter().find(|o| o["tag"] == "pool").expect("urltest-группа pool");
+        assert_eq!(pool_group["type"], "urltest");
+        assert_eq!(pool_group["outbounds"][0], "pool-p0");
+        assert!(outs.iter().any(|o| o["tag"] == "pool-p0" && o["type"] == "http"));
+        assert!(outs.iter().any(|o| o["tag"] == "pool-p1" && o["type"] == "socks"));
+        assert_eq!(outs.iter().find(|o| o["tag"] == "pool-p0").unwrap()["username"], "u");
+        let rules = cfg["route"]["rules"].as_array().unwrap();
+        assert_eq!(rules[0]["process_name"][0], "python.exe");
+        assert_eq!(rules[0]["outbound"], "pool");
+
+        // Пул-правило без пула — честная ошибка.
+        let mut p2 = profile_from_nodes("nopool", vec![node("n1", LINK1)], Some("n1".into()), Some(2080), false, crate::vpn::TunnelRoute::All, vec![]);
+        p2.rules.push(Rule { name: None, matcher: RuleMatch::Any, exit: ExitRef::Pool });
+        let err = compile(&p2, 9090).unwrap_err();
+        assert!(err.contains("пул"), "{err}");
     }
 
     #[test]

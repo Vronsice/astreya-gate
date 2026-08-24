@@ -39,6 +39,9 @@ import {
   vpnAddLink,
   vpnOverview,
   vpnPingAll,
+  vpnRuleRemove,
+  vpnRuleSave,
+  vpnRulesGet,
   vpnSetActive,
   vpnSetRoute,
   vpnStart,
@@ -47,7 +50,7 @@ import {
   vpnSystemProxySet,
 } from "../lib/api";
 import { formatUptime, useStatus } from "../lib/status";
-import type { AppView, BridgeHealth, VpnOverview } from "../lib/types";
+import type { AppView, BridgeHealth, RoutingRule, VpnOverview } from "../lib/types";
 import { cn } from "../lib/cn";
 import "@xyflow/react/dist/style.css";
 
@@ -270,6 +273,7 @@ function RouteMap({ onNavigate }: { onNavigate?: (v: AppView) => void }) {
   const [addOpen, setAddOpen] = useState(false);
   const [addText, setAddText] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
+  const [rules, setRules] = useState<RoutingRule[] | null>(null);
   const lastTotals = useRef<{ t: number; up: number; down: number } | null>(null);
 
   const flash = (m: string) => {
@@ -309,6 +313,7 @@ function RouteMap({ onNavigate }: { onNavigate?: (v: AppView) => void }) {
     };
     void tick();
     void vpnSystemProxyGet().then((v) => alive && setLive((p) => ({ ...p, sysProxy: v }))).catch(() => {});
+    void vpnRulesGet().then((r) => alive && setRules(r)).catch(() => {});
     void vpnPingAll()
       .then((r) => {
         const clean: Record<string, number> = {};
@@ -610,6 +615,34 @@ function RouteMap({ onNavigate }: { onNavigate?: (v: AppView) => void }) {
               live={live}
               busy={busy}
               health={health}
+              rules={rules}
+              onRuleSave={async (proc, exit) => {
+                setBusy(true);
+                try {
+                  setRules(
+                    await vpnRuleSave({
+                      name: `app-${proc.toLowerCase()}`,
+                      match: { match: "process_name", list: [proc] },
+                      exit,
+                    }),
+                  );
+                  flash(`правило: ${proc} → применено`);
+                } catch (e) {
+                  flash(String(e));
+                } finally {
+                  setBusy(false);
+                }
+              }}
+              onRuleRemove={async (name) => {
+                setBusy(true);
+                try {
+                  setRules(await vpnRuleRemove(name));
+                } catch (e) {
+                  flash(String(e));
+                } finally {
+                  setBusy(false);
+                }
+              }}
               onSwitchNode={connectToNode}
               onToggleSysProxy={() => act(() => vpnSystemProxySet(!(live.sysProxy ?? false)))}
               onTogglePac={() => act(() => (live.pac ? browsersDisable() : browsersEnable()))}
@@ -640,6 +673,9 @@ function MapPanel({
   live,
   busy,
   health,
+  rules,
+  onRuleSave,
+  onRuleRemove,
   onSwitchNode,
   onToggleSysProxy,
   onTogglePac,
@@ -651,6 +687,9 @@ function MapPanel({
   live: MapData;
   busy: boolean;
   health: BridgeHealth | null;
+  rules: RoutingRule[] | null;
+  onRuleSave: (proc: string, exit: RoutingRule["exit"]) => void;
+  onRuleRemove: (name: string) => void;
   onSwitchNode: (id: string) => void;
   onToggleSysProxy: () => void;
   onTogglePac: () => void;
@@ -749,14 +788,7 @@ function MapPanel({
       )}
 
       {id === "apps" && (
-        <>
-          <p className="text-[12px] leading-relaxed text-vb-silver-dim">
-            Назначь конкретным приложениям маршрут: напрямую, через пул или через цепочку.
-          </p>
-          <button type="button" className={btn} onClick={() => onNavigate("apps")}>
-            Открыть «Приложения»
-          </button>
-        </>
+        <RuleEditor rules={rules} busy={busy} health={health} onSave={onRuleSave} onRemove={onRuleRemove} live={live} />
       )}
 
       {id === "env" && (
@@ -784,6 +816,135 @@ function MapPanel({
         </>
       )}
     </div>
+  );
+}
+
+/* ── Редактор per-app правил (process_name → выход) ────────────── */
+
+function exitLabel(exit: RoutingRule["exit"], live: MapData): string {
+  if (exit.type === "direct") return "напрямую";
+  if (exit.type === "pool") return "прокси-пул";
+  if (exit.type === "selector") return "активная нода";
+  if (exit.type === "reject") return "блокировка";
+  const n = live.ov?.nodes.find((x) => x.id === exit.id);
+  return n ? `${flagOf(n.name)} ${n.name}` : `нода ${exit.id}`;
+}
+
+function matchLabel(r: RoutingRule): string {
+  switch (r.match.match) {
+    case "process_name":
+      return r.match.list.join(", ");
+    case "domain_suffix":
+      return `домены: ${r.match.list.slice(0, 2).join(", ")}${r.match.list.length > 2 ? "…" : ""}`;
+    case "domain_keyword":
+      return `ключевые: ${r.match.list.join(", ")}`;
+    default:
+      return "весь трафик";
+  }
+}
+
+function RuleEditor({
+  rules,
+  busy,
+  health,
+  onSave,
+  onRemove,
+  live,
+}: {
+  rules: RoutingRule[] | null;
+  busy: boolean;
+  health: BridgeHealth | null;
+  onSave: (proc: string, exit: RoutingRule["exit"]) => void;
+  onRemove: (name: string) => void;
+  live: MapData;
+}) {
+  const [proc, setProc] = useState("");
+  const [exitKind, setExitKind] = useState<"selector" | "direct" | "pool">("selector");
+
+  return (
+    <>
+      <p className="text-[12px] leading-relaxed text-vb-silver-dim">
+        Правило: приложение (по имени процесса) → выход. Применяется перезапуском
+        туннеля; надёжнее всего работает в системном режиме (TUN).
+      </p>
+      <div className="flex flex-col gap-2">
+        <input
+          value={proc}
+          onChange={(e) => setProc(e.target.value)}
+          placeholder="имя процесса, напр. telegram.exe"
+          className="w-full rounded-lg border border-vb-border bg-vb-surface px-3 py-2 font-mono text-[12px] text-vb-fg outline-none placeholder:text-vb-silver-faint focus:border-vb-emerald/50"
+        />
+        <div className="flex gap-1.5">
+          {(
+            [
+              ["selector", "Активная нода"],
+              ["direct", "Напрямую"],
+              ["pool", "Пул"],
+            ] as const
+          ).map(([k, label]) => (
+            <button
+              key={k}
+              type="button"
+              onClick={() => setExitKind(k)}
+              disabled={k === "pool" && (health?.upstreams.length ?? 0) === 0}
+              className={cn(
+                "flex-1 rounded-lg border px-2 py-1.5 text-[11.5px] font-medium transition-colors",
+                exitKind === k
+                  ? "border-vb-emerald/50 bg-vb-emerald/[0.08] text-vb-emerald"
+                  : "border-vb-border bg-vb-surface text-vb-silver-dim hover:text-vb-silver",
+              )}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            const p = proc.trim();
+            if (!p) return;
+            onSave(p, { type: exitKind } as RoutingRule["exit"]);
+            setProc("");
+          }}
+          disabled={busy || !proc.trim()}
+          className="flex w-full items-center justify-center gap-2 rounded-lg bg-vb-emerald px-3 py-2 text-[13px] font-semibold text-black transition-colors hover:bg-vb-emerald-bright disabled:opacity-40"
+        >
+          <Plus className="h-4 w-4" />
+          Добавить правило
+        </button>
+      </div>
+
+      {rules && rules.length > 0 && (
+        <div className="flex flex-col gap-1">
+          <div className="text-[11px] uppercase tracking-[0.06em] text-vb-silver-faint">
+            Правила ({rules.length})
+          </div>
+          {rules.map((r) => (
+            <div
+              key={r.name ?? matchLabel(r)}
+              className="flex items-center gap-2 rounded-lg bg-vb-surface px-2.5 py-1.5"
+            >
+              <span className="min-w-0 flex-1 truncate text-[12px] text-vb-silver">
+                <span className="font-mono text-vb-fg">{matchLabel(r)}</span>
+                <span className="text-vb-silver-faint"> → </span>
+                {exitLabel(r.exit, live)}
+              </span>
+              {r.name && (
+                <button
+                  type="button"
+                  onClick={() => onRemove(r.name!)}
+                  disabled={busy}
+                  className="rounded-md p-1 text-vb-silver-faint transition-colors hover:bg-vb-loss/10 hover:text-vb-loss disabled:opacity-40"
+                  title="Удалить правило"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </>
   );
 }
 

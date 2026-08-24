@@ -102,6 +102,10 @@ pub struct Settings {
     /// VPN: активная нода (id) — для старта sing-box.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vpn_active: Option<String>,
+    /// VPN: пользовательские правила маршрутизации (per-app и др.),
+    /// компилируются в конфиг sing-box в порядке следования.
+    #[serde(default)]
+    pub vpn_rules: Vec<crate::routing::Rule>,
     /// Локальный порт VPN-прокси (mixed inbound sing-box). Дефолт 2080.
     #[serde(default = "default_vpn_port")]
     pub vpn_port: u16,
@@ -273,6 +277,14 @@ pub fn set_vpn_active(node_id: Option<String>) -> Result<Settings, String> {
         s.vpn_active = node_id;
         Ok(())
     })
+}
+
+pub fn set_vpn_rules(rules: Vec<crate::routing::Rule>) -> Result<(), String> {
+    with_settings(|s| {
+        s.vpn_rules = rules;
+        Ok(())
+    })?;
+    Ok(())
 }
 
 pub fn set_vpn_last_update(sub_id: &str, ts: u64) -> Result<(), String> {

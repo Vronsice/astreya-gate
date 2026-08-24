@@ -139,6 +139,9 @@ pub fn run() {
             commands::vpn_tun_disable,
             commands::vpn_system_proxy_set,
             commands::vpn_system_proxy_get,
+            commands::vpn_rules_get,
+            commands::vpn_rule_save,
+            commands::vpn_rule_remove,
             // Окна (трей-попап)
             commands::show_main_window,
             commands::quit_app,
