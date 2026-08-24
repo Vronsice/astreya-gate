@@ -77,6 +77,7 @@ export interface ShimTestResult {
 // ─── App-level navigation ────────────────────────────────────────
 
 export type AppView =
+  | "home"
   | "map"
   | "nodes"
   | "rules"

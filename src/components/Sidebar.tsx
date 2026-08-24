@@ -3,6 +3,7 @@ import {
   BookOpen,
   Blocks,
   Compass,
+  House,
   ListChecks,
   Settings2,
   Waypoints,
@@ -15,6 +16,7 @@ import { cn } from "../lib/cn";
 import type { AppView } from "../lib/types";
 
 export const NAV_ORDER: AppView[] = [
+  "home",
   "map",
   "nodes",
   "rules",
@@ -25,7 +27,8 @@ export const NAV_ORDER: AppView[] = [
 ];
 
 const NAV_ITEMS: { id: AppView; label: string; icon: typeof Waypoints }[] = [
-  { id: "map", label: "Карта", icon: Waypoints },
+  { id: "home", label: "Пульт", icon: House },
+  { id: "map", label: "Схема", icon: Waypoints },
   { id: "nodes", label: "Ноды", icon: Wifi },
   { id: "rules", label: "Правила", icon: ListChecks },
   { id: "bridge", label: "AI-мост", icon: Blocks },
@@ -86,12 +89,12 @@ export function Sidebar({ view, onNavigate }: Props) {
         type="button"
         onClick={() => onNavigate("map")}
         aria-label="Astreya Gate — Карта"
-        aria-current={view === "map" ? "page" : undefined}
-        title={view !== "map" ? "К Карте" : undefined}
+        aria-current={view === "home" ? "page" : undefined}
+        title={view !== "home" ? "К Пульту" : undefined}
         className={cn(
           "group relative mx-2.5 mb-3 mt-2.5 flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left",
           "transition-colors duration-150 active:scale-[0.98]",
-          view !== "map" && "hover:bg-vb-surface-2/50",
+          view !== "home" && "hover:bg-vb-surface-2/50",
         )}
       >
         {view === "map" && (
@@ -121,7 +124,7 @@ export function Sidebar({ view, onNavigate }: Props) {
               className="relative shrink-0 text-vb-silver-faint transition-colors duration-150 group-hover:text-vb-silver"
               aria-hidden
             >
-              <Waypoints className="h-3.5 w-3.5" strokeWidth={1.9} />
+              <House className="h-3.5 w-3.5" strokeWidth={1.9} />
             </motion.span>
           )}
         </AnimatePresence>

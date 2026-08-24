@@ -58,17 +58,12 @@ import {
   vpnTunStatus,
 } from "../lib/api";
 import { formatUptime, useStatus } from "../lib/status";
+import { cleanNodeName, flagOf } from "../lib/nodeNames";
 import type { AppView, BridgeHealth, RoutingRule, VpnOverview } from "../lib/types";
 import { cn } from "../lib/cn";
 import "@xyflow/react/dist/style.css";
 
 /* ── утилиты ─────────────────────────────────────────────────── */
-
-function flagOf(name: string): string {
-  const m = name.match(/^([a-z]{2})\b/i);
-  if (!m) return "🌐";
-  return m[1].toUpperCase().replace(/./g, (c) => String.fromCodePoint(127397 + c.charCodeAt(0)));
-}
 
 const fmtSpeed = (bps?: number) =>
   bps === undefined || bps === null
@@ -384,7 +379,7 @@ function RouteMap({ onNavigate }: { onNavigate?: (v: AppView) => void }) {
         position: { x: 600, y: 240 + i * 78 },
         data: {
           live,
-          name: n.name,
+          name: cleanNodeName(n.name),
           flag: flagOf(n.name),
           sub:
             live.pings?.[n.id]
@@ -495,7 +490,7 @@ function RouteMap({ onNavigate }: { onNavigate?: (v: AppView) => void }) {
       markerEnd: on ? { type: MarkerType.ArrowClosed, color: "#34d399" } : undefined,
     });
     const list: Edge[] = [
-      mk("e-browsers-tunnel", "browsers", "tunnel", live.sysProxy === true && vpnRunning, live.sysProxy ? "системный прокси" : "проведи связь"),
+      mk("e-browsers-tunnel", "browsers", "tunnel", live.sysProxy === true && vpnRunning, live.sysProxy ? "системный прокси" : undefined),
       mk("e-browsers-bridge", "browsers", "bridge", live.pac === true && bridgeRunning, live.pac ? "PAC" : undefined),
       mk("e-apps-bridge", "apps", "bridge", bridgeRunning),
       mk("e-env-bridge", "env", "bridge", envOn && bridgeRunning),

@@ -29,6 +29,7 @@ import {
   vpnSystemProxySet,
 } from "../lib/api";
 import { formatUptime, useStatus } from "../lib/status";
+import { cleanNodeName } from "../lib/nodeNames";
 import type { VpnOverview } from "../lib/types";
 import { cn } from "../lib/cn";
 
@@ -261,7 +262,7 @@ export function TrayPopup() {
                     speed ? ` · ↓ ${fmtSpeed(speed.down)} · ↑ ${fmtSpeed(speed.up)}` : ""
                   }${ov?.process.uptime_sec ? ` · ${formatUptime(ov.process.uptime_sec)}` : ""}`
                 : ov?.active
-                  ? `нода: ${activeNode?.name ?? "—"}`
+                  ? `нода: ${activeNode ? cleanNodeName(activeNode.name) : "—"}`
                   : "нода не выбрана"}
             </div>
           </div>
@@ -322,7 +323,7 @@ export function TrayPopup() {
                     className="flex w-full items-center gap-2.5 px-4 py-1.5 text-left transition-colors hover:bg-vb-surface-2/60 disabled:opacity-50"
                   >
                     <span className="text-[13px] leading-none">{flagOf(n.name)}</span>
-                    <span className="min-w-0 flex-1 truncate text-[12.5px] text-vb-silver">{n.name}</span>
+                    <span className="min-w-0 flex-1 truncate text-[12.5px] text-vb-silver">{cleanNodeName(n.name)}</span>
                     <span className={cn("tnum text-[11px]", pings?.[n.id] ? "text-vb-silver-faint" : "text-vb-loss/70")}>
                       {pings?.[n.id] ? `${pings[n.id]} мс` : "—"}
                     </span>

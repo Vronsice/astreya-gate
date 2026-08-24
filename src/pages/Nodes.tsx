@@ -26,6 +26,7 @@ import {
 } from "../lib/api";
 import type { VpnNode, VpnOverview } from "../lib/types";
 import { fadeInUp, staggerContainer } from "../lib/motion";
+import { cleanNodeName } from "../lib/nodeNames";
 import { cn } from "../lib/cn";
 
 /*
@@ -356,7 +357,7 @@ export function Nodes() {
               )}
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
-                  <span className="truncate text-[13px] text-vb-fg">{n.name}</span>
+                  <span className="truncate text-[13px] text-vb-fg">{cleanNodeName(n.name)}</span>
                   <span
                     className={cn(
                       "shrink-0 rounded-md border px-1.5 py-px text-[10px] font-medium",

@@ -7,6 +7,7 @@ import { StepProxy } from "./wizard/StepProxy";
 import { StepInstall } from "./wizard/StepInstall";
 import { StepDone } from "./wizard/StepDone";
 import { RouteMapPage } from "./pages/RouteMap";
+import { Home } from "./pages/Home";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Nodes } from "./pages/Nodes";
 import { Rules } from "./pages/Rules";
@@ -45,7 +46,7 @@ const viewVariants = {
 function App() {
   // ─── Top-level routing ───────────────────────────────────────
   // На старте определяем: установлен ли уже мост → Обзор, иначе Wizard.
-  const [view, setView] = useState<AppView | null>(IS_TRAY ? "map" : null);
+  const [view, setView] = useState<AppView | null>(IS_TRAY ? "home" : null);
   const prevIndex = useRef(0);
   const [direction, setDirection] = useState(1);
 
@@ -63,7 +64,7 @@ function App() {
           shimStatus().catch(() => null),
         ]);
         const installed = !!s?.proxy_url || !!scriptPath || !!status?.running;
-        setView(installed ? "map" : "wizard");
+        setView(installed ? "home" : "wizard");
       } catch {
         setView("wizard");
       }
@@ -121,7 +122,7 @@ function App() {
                 />
               )}
               {step === "done" && wizResult && (
-                <StepDone result={wizResult} onFinish={() => setView("map")} />
+                <StepDone result={wizResult} onFinish={() => setView("home")} />
               )}
             </WizardShell>
           </div>
@@ -151,7 +152,9 @@ function App() {
                    даёт height:auto, и канва схлопывается в ноль. */
                 className={view === "map" ? "h-full" : "min-h-full"}
               >
-                {view === "map" ? (
+                {view === "home" ? (
+                  <Home onNavigate={navigate} />
+                ) : view === "map" ? (
                   <RouteMapPage onNavigate={navigate} />
                 ) : view === "nodes" ? (
                   <Nodes />
