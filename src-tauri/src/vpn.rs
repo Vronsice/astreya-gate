@@ -906,7 +906,17 @@ pub fn build_config(
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 
 fn exe_path() -> Result<std::path::PathBuf, String> {
-    // Dev-режим: resources/ рядом с манифестом крейта.
+    // 1) Установленное приложение: resources/ рядом с нашим exe
+    //    (%LOCALAPPDATA%\Programs\Astreya Gate\resources\sing-box.exe).
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let installed = dir.join("resources").join("sing-box.exe");
+            if installed.exists() {
+                return Ok(installed);
+            }
+        }
+    }
+    // 2) Dev-режим: resources/ рядом с манифестом крейта.
     if let Ok(dir) = std::env::var("CARGO_MANIFEST_DIR") {
         let dev =
             std::path::PathBuf::from(dir).join("resources").join("sing-box.exe");
@@ -914,7 +924,7 @@ fn exe_path() -> Result<std::path::PathBuf, String> {
             return Ok(dev);
         }
     }
-    Err("sing-box.exe не найден в ресурсах приложения".into())
+    Err("sing-box.exe не найден в ресурсах приложения — переустановите Astreya Gate".into())
 }
 
 fn config_dir() -> Result<std::path::PathBuf, String> {
