@@ -33,6 +33,19 @@ pub(crate) fn manually_stopped() -> bool {
 }
 
 pub const LISTEN_PORT: u16 = 8889;
+
+/// Имя процесса, слушающего локальный порт (для диагностики «порт занят»).
+pub fn process_name_on_port(port: u16) -> String {
+    let script = format!(
+        "$c = Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; \
+         if ($c) {{ $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue; \
+         if ($p) {{ Write-Output $p.Name }} else {{ Write-Output 'неизвестный процесс' }} }} \
+         else {{ Write-Output 'нет слушателя' }}"
+    );
+    let out = crate::tasks::run_ps_public(&script).unwrap_or_default();
+    let name = out.trim().to_string();
+    if name.is_empty() { "неизвестный процесс".into() } else { name }
+}
 /// Легаси python-мост (для миграции/детекта старых установок).
 const SHIM_FILENAME: &str = "local-proxy.py";
 /// Новый мост — самостоятельный exe (НЕ python.exe). Критично: killswitch

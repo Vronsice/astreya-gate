@@ -46,6 +46,7 @@ pub struct VpnNode {
 }
 
 /// Результат разбора ссылки.
+#[derive(Debug)]
 pub struct ParsedLink {
     pub name: String,
     pub proto: &'static str,
@@ -299,7 +300,25 @@ fn parse_vless(rest: &str) -> Result<ParsedLink, String> {
         o["flow"] = serde_json::json!(flow);
     }
     if let Some(tls) = tls_block(&q, &host) {
-        o["tls"] = tls;
+        // ALPN из ссылки (через ';'), если провайдер указал.
+        if let Some(alpn) = q.get("alpn").filter(|s| !s.is_empty()) {
+            let list: Vec<&str> = alpn.split(';').filter(|s| !s.is_empty()).collect();
+            if !list.is_empty() {
+                let mut t = tls.clone();
+                t["alpn"] = serde_json::json!(list);
+                o["tls"] = t;
+            } else {
+                o["tls"] = tls;
+            }
+        } else {
+            o["tls"] = tls;
+        }
+    }
+    if net == "xhttp" || net == "splithttp" {
+        return Err(
+            "транспорт XHTTP не поддерживается движком sing-box — выберите Reality/TCP-вариант ноды"
+                .into(),
+        );
     }
     if let Some(tr) = transport_block(&q, &net) {
         o["transport"] = tr;
@@ -622,7 +641,12 @@ pub fn parse_subscription_body(body: &str) -> Vec<String> {
 // ─── Конвертер v2rayN-config → ссылка ───────────────────────────
 
 /// Из одного элемента массива v2rayN вытащить основной outbound и собрать
-/// каноническую ссылку протокола. None — протокол не поддерживаем.
+/// каноническую ссылку протокола. None — протокол/транспорт не поддерживаем.
+///
+/// Выбор outbound'а: в одном конфиге бывает несколько вариантов одной ноды
+/// (proxy, proxy-1…: reality+vision И xhttp+tls). sing-box не умеет XHTTP
+/// (это транспорт Xray-ядра) — такие пропускаем и берём первый СОВМЕСТИМЫЙ,
+/// предпочитая тег "proxy".
 fn v2rayn_config_to_link(cfg: &serde_json::Value) -> Option<String> {
     let name = cfg
         .get("remarks")
@@ -630,14 +654,37 @@ fn v2rayn_config_to_link(cfg: &serde_json::Value) -> Option<String> {
         .unwrap_or("")
         .to_string();
     let outs = cfg.get("outbounds")?.as_array()?;
-    // Основной outbound: первый непрямой протокол (freedom/blacklist — служебные).
     let supported = ["vless", "vmess", "shadowsocks", "trojan", "hysteria2", "tuic"];
-    let out = outs
+    let incompatible_net = ["xhttp", "splithttp"];
+
+    let mut candidates: Vec<&serde_json::Value> = outs
         .iter()
-        .find(|o| {
+        .filter(|o| {
             let p = o.get("protocol").and_then(|p| p.as_str()).unwrap_or("");
-            supported.contains(&p)
-        })?;
+            if !supported.contains(&p) {
+                return false;
+            }
+            let net = o
+                .get("streamSettings")
+                .and_then(|s| s.get("network"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("tcp")
+                .to_ascii_lowercase();
+            !incompatible_net.contains(&net.as_str())
+        })
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    // Тег "proxy" — главный вариант по конвенции v2rayN.
+    if let Some(main) = candidates.iter().position(|o| {
+        o.get("tag").and_then(|t| t.as_str()) == Some("proxy")
+    }) {
+        if main > 0 {
+            candidates.rotate_left(main);
+        }
+    }
+    let out = candidates[0];
 
     let proto = out.get("protocol")?.as_str()?;
     let settings = out.get("settings")?;
@@ -987,6 +1034,20 @@ pub fn start_routed(
     mode: TunnelRoute,
     whitelist: &[String],
 ) -> Result<String, String> {
+    // Порт занят ДРУГИМ процессом (NekoBox/другой VPN-клиент)? Честная
+    // ошибка сразу — иначе sing-box упадёт на bind, а проверка «порт
+    // открыт?» увидела бы чужой порт и вернула ложный успех.
+    if std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        std::time::Duration::from_millis(300),
+    )
+    .is_ok()
+    {
+        let who = crate::shim::process_name_on_port(port);
+        return Err(format!(
+            "порт {port} уже занят ({who}) — остановите другой VPN-клиент или смените порт VPN в настройках"
+        ));
+    }
     // Перезапуск поверх живого процесса — сначала стоп.
     stop();
     let parsed = parse_link(active_node_link)?;
@@ -1328,9 +1389,19 @@ pub async fn refresh_subscriptions_inner(
             .filter(|n| n.source != sub.id)
             .cloned()
             .collect();
+        let mut skipped = 0usize;
+        let mut skip_reason = String::new();
         for l in links {
-            let parsed =
-                parse_link(&l).map_err(|e| format!("«{}»: битая ссылка ({e})", sub.name))?;
+            let parsed = match parse_link(&l) {
+                Ok(p) => p,
+                Err(e) => {
+                    skipped += 1;
+                    if skip_reason.is_empty() {
+                        skip_reason = e;
+                    }
+                    continue;
+                }
+            };
             nodes.push(VpnNode {
                 id: node_id(&l),
                 name: parsed.name,
@@ -1342,7 +1413,16 @@ pub async fn refresh_subscriptions_inner(
                 added_at: now,
             });
         }
+        if nodes.is_empty() && skipped > 0 {
+            return Err(format!(
+                "«{}»: ни одна нода не поддерживается (пример: {skip_reason})",
+                sub.name
+            ));
+        }
         snap.vpn_nodes = nodes;
+        if skipped > 0 {
+            tracing::info!("подписка «{}»: пропущено нод: {skipped}", sub.name);
+        }
         updated += 1;
         let _ = crate::settings::set_vpn_last_update(&sub.id, now);
     }
@@ -1804,6 +1884,55 @@ mod tests {
         assert_eq!(v.outbound["transport"]["path"], "/ray");
         assert_eq!(v.outbound["transport"]["headers"]["Host"], "front.io");
         assert_eq!(v.name, "VM node");
+    }
+
+    #[test]
+    fn subscription_v2rayn_prefers_reality_over_xhttp() {
+        // Реальный кейс провайдера: у ноды два outbound'а — XHTTP+TLS (не
+        // поддерживается sing-box) и Reality+vision. Конвертер обязан взять
+        // Reality, иначе нода «подключается», но не пропускает трафик.
+        let body = serde_json::json!([
+            {
+                "remarks": "DE Германия",
+                "outbounds": [
+                    { "tag": "proxy", "protocol": "vless",
+                      "settings": { "vnext": [{ "address": "static.1o0.net", "port": 443,
+                        "users": [{ "id": "uuid-x", "encryption": "none", "flow": "" }] }] },
+                      "streamSettings": { "network": "xhttp", "security": "tls",
+                        "tlsSettings": { "serverName": "static.1o0.net", "fingerprint": "firefox" },
+                        "xhttpSettings": { "mode": "packet-up", "path": "/yjG2FoRf" } } },
+                    { "tag": "proxy-1", "protocol": "vless",
+                      "settings": { "vnext": [{ "address": "static.1o0.net", "port": 443,
+                        "users": [{ "id": "uuid-x", "encryption": "none", "flow": "xtls-rprx-vision" }] }] },
+                      "streamSettings": { "network": "tcp", "security": "reality",
+                        "realitySettings": { "serverName": "static-cdn.1o0.net", "fingerprint": "firefox",
+                          "publicKey": "87wWQkyS_4sBlSYgQQS0P_eL1yzg_xNt01ErwyQAFGA", "shortId": "b4730202e64b101c" } } },
+                    { "tag": "direct", "protocol": "freedom" }
+                ]
+            }
+        ])
+        .to_string();
+        let links = parse_subscription_body(&body);
+        assert_eq!(links.len(), 1, "XHTTP-вариант отфильтрован, Reality взят");
+        let parsed = parse_link(&links[0]).unwrap();
+        assert_eq!(parsed.outbound["flow"], "xtls-rprx-vision");
+        assert_eq!(parsed.outbound["tls"]["reality"]["enabled"], true);
+        assert_eq!(
+            parsed.outbound["tls"]["reality"]["public_key"],
+            "87wWQkyS_4sBlSYgQQS0P_eL1yzg_xNt01ErwyQAFGA"
+        );
+        assert_eq!(parsed.outbound["tls"]["server_name"], "static-cdn.1o0.net");
+        // Транспорт не должен попасть в конфиг (tcp без transport-блока).
+        assert!(parsed.outbound.get("transport").is_none());
+    }
+
+    #[test]
+    fn vless_xhttp_link_rejected_with_clear_error() {
+        let err = parse_link(
+            "vless://u@h.io:443?type=xhttp&security=tls&path=%2Fx#xhttp-node",
+        )
+        .unwrap_err();
+        assert!(err.contains("XHTTP"), "понятное сообщение, получено: {err}");
     }
 
     #[test]
