@@ -916,7 +916,7 @@ pub fn node_id(seed: &str) -> String {
 // ─── Генерация конфига sing-box ─────────────────────────────────
 
 pub const VPN_PORT_DEFAULT: u16 = 2080;
-const CLASH_API_PORT: u16 = 29090;
+pub const CLASH_API_PORT: u16 = 29090;
 
 /// Полный конфиг sing-box для активной ноды: mixed-in на vpn_port,
 /// outbound ноды (tag=proxy), direct-fallback, route по выбранному режиму,

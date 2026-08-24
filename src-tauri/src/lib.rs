@@ -5,6 +5,7 @@ mod env_proxy;
 mod firewall;
 mod monitor;
 mod proxy;
+mod routing;
 mod settings;
 mod shim;
 mod system;
