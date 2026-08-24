@@ -148,7 +148,9 @@ function App() {
                 initial="enter"
                 animate="center"
                 exit="exit"
-                className="min-h-full"
+                /* Карте (React Flow) нужна точная высота родителя: min-h-full
+                   даёт height:auto, и канва схлопывается в ноль. */
+                className={view === "map" ? "h-full" : "min-h-full"}
               >
                 {view === "overview" ? (
                   <Overview onOpenProxies={() => navigate("proxies")} />
