@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { Download, Loader2, Power, RefreshCw } from "lucide-react";
 import {
@@ -20,6 +20,45 @@ const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const LAST_UPDATE_CHECK_KEY = "astreya-gate-last-update-check";
 
 type UpdatePhase = "idle" | "checking" | "latest" | "error";
+
+/** Инлайн-разметка заметок: **жирный** → strong, остальное — как есть. */
+function inlineMd(s: string): ReactNode[] {
+  return s.split(/(\*\*[^*]+\*\*)/g).map((p, i) =>
+    p.startsWith("**") && p.endsWith("**") && p.length > 4 ? (
+      <strong key={i} className="font-semibold text-vb-silver">
+        {p.slice(2, -2)}
+      </strong>
+    ) : (
+      <span key={i}>{p}</span>
+    ),
+  );
+}
+
+/**
+ * Заметки релиза: Markdown-лайт (абзацы, "- " буллеты, **жирный**).
+ * Рисуем компактными списками вместо сырого текста с пустыми строками.
+ */
+function NotesText({ text }: { text: string }) {
+  const lines = text.split(/\r?\n/);
+  return (
+    <div className="mt-1 flex flex-col gap-1 text-[12px] leading-relaxed text-vb-silver-dim">
+      {lines.map((raw, i) => {
+        const line = raw.trim();
+        if (!line) return <div key={i} className="h-1.5" />;
+        const bullet = /^[-•*]\s+/.test(line);
+        const content = bullet ? line.replace(/^[-•*]\s+/, "") : line;
+        return bullet ? (
+          <div key={i} className="flex gap-2">
+            <span className="mt-[7px] h-1 w-1 shrink-0 rounded-full bg-vb-emerald/70" />
+            <span>{inlineMd(content)}</span>
+          </div>
+        ) : (
+          <p key={i}>{inlineMd(content)}</p>
+        );
+      })}
+    </div>
+  );
+}
 
 /*
   Настройки: автозапуск GUI и версии. Прокси-пул и назначения живут в
@@ -183,11 +222,7 @@ export function Settings() {
             <div className="text-[13px] font-medium text-vb-fg">
               Доступна версия {updateAvail.version}
             </div>
-            {updateAvail.body && (
-              <p className="mt-1 whitespace-pre-line text-[12px] leading-relaxed text-vb-silver-dim">
-                {updateAvail.body}
-              </p>
-            )}
+            {updateAvail.body && <NotesText text={updateAvail.body} />}
             <Button
               size="sm"
               className="mt-2.5"
