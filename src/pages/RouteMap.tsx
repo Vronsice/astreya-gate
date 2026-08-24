@@ -68,6 +68,10 @@ interface MapData {
 
 /* ── кастомные узлы ──────────────────────────────────────────── */
 
+/* Дефолт на первый рендер: ReactFlow монтирует узлы с data:{} до того,
+   как эффект наполнит их живыми данными — без дефолта будет TypeError. */
+const EMPTY_LIVE: MapData = { ov: null, sysProxy: null, speed: null, pings: null };
+
 function NodeShell({
   active,
   problem,
@@ -111,7 +115,7 @@ function MetricChip({ label, value, accent }: { label: string; value: string; ac
 
 type SourceNodeData = { live: MapData; envOn: boolean; active: boolean };
 function BrowserNode({ data, selected }: NodeProps) {
-  const d = data as unknown as SourceNodeData;
+  const d = (data as unknown as SourceNodeData) ?? { live: EMPTY_LIVE, envOn: false, active: false };
   return (
     <NodeShell active={d.active} selected={selected} handles="r">
       <div className="flex items-center gap-2">
@@ -126,7 +130,7 @@ function BrowserNode({ data, selected }: NodeProps) {
 }
 
 function AppsNode({ data, selected }: NodeProps) {
-  const d = data as unknown as SourceNodeData;
+  const d = (data as unknown as SourceNodeData) ?? { live: EMPTY_LIVE, envOn: false, active: false };
   const h = d.live.ov; void h;
   return (
     <NodeShell active={d.active} selected={selected} handles="r">
@@ -140,7 +144,7 @@ function AppsNode({ data, selected }: NodeProps) {
 }
 
 function EnvNode({ data, selected }: NodeProps) {
-  const d = data as unknown as SourceNodeData;
+  const d = (data as unknown as SourceNodeData) ?? { live: EMPTY_LIVE, envOn: false, active: false };
   return (
     <NodeShell active={d.active} selected={selected} handles="r">
       <div className="flex items-center gap-2">
@@ -156,7 +160,7 @@ function EnvNode({ data, selected }: NodeProps) {
 
 type VpnNodeData = { live: MapData };
 function TunnelNode({ data, selected }: NodeProps) {
-  const d = data as unknown as VpnNodeData;
+  const d = (data as unknown as VpnNodeData) ?? { live: EMPTY_LIVE };
   const running = d.live.ov?.process.running ?? false;
   const node = d.live.ov?.nodes.find((n) => n.id === d.live.ov?.active);
   return (
@@ -186,13 +190,13 @@ function TunnelNode({ data, selected }: NodeProps) {
       </div>
       <div className="mt-1 truncate text-[11px] text-vb-silver-faint">
         {running
-          ? `${node?.name ?? "нода"} · ${formatUptime(d.live.ov?.process.uptime_sec)}`
+          ? `${node?.name ?? "нода"} · ${formatUptime(d.live?.ov?.process.uptime_sec)}`
           : "выключен"}
       </div>
-      {running && d.live.speed && (
+      {running && d.live?.speed && (
         <div className="mt-2 grid grid-cols-2 gap-1.5">
-          <MetricChip label="приём" value={fmtSpeed(d.live.speed.down)} accent />
-          <MetricChip label="отдача" value={fmtSpeed(d.live.speed.up)} />
+          <MetricChip label="приём" value={fmtSpeed(d.live?.speed?.down)} accent />
+          <MetricChip label="отдача" value={fmtSpeed(d.live?.speed?.up)} />
         </div>
       )}
     </NodeShell>
@@ -200,8 +204,8 @@ function TunnelNode({ data, selected }: NodeProps) {
 }
 
 function BridgeNode({ data, selected }: NodeProps) {
-  const d = data as unknown as { live: MapData; health: BridgeHealth | null };
-  const running = d.health !== null;
+  const d = (data as unknown as { live: MapData; health: BridgeHealth | null }) ?? { live: EMPTY_LIVE, health: null };
+  const running = d.health != null;
   const smart = d.health?.mode === "smart";
   return (
     <NodeShell active={running} selected={selected}>
@@ -212,7 +216,7 @@ function BridgeNode({ data, selected }: NodeProps) {
       <div className="mt-1 text-[11px] text-vb-silver-faint">
         {running ? (smart ? "умная маршрутизация" : "весь трафик через пул") : "остановлен"}
       </div>
-      {running && d.health && (
+      {running && d.health != null && (
         <div className="mt-2 grid grid-cols-2 gap-1.5">
           <MetricChip label="через пул" value={String(d.health.via_upstream)} />
           <MetricChip label="напрямую" value={String(d.health.via_direct)} />
@@ -224,7 +228,7 @@ function BridgeNode({ data, selected }: NodeProps) {
 
 type ExitNodeData = { live: MapData; name: string; flag: string; sub: string; active: boolean; problem?: boolean };
 function ExitNode({ data, selected }: NodeProps) {
-  const d = data as unknown as ExitNodeData;
+  const d = (data as unknown as ExitNodeData) ?? { live: EMPTY_LIVE, name: "", flag: "", sub: "", active: false };
   return (
     <NodeShell active={d.active} problem={d.problem} selected={selected} handles="l">
       <div className="flex items-center gap-2">

@@ -10,6 +10,7 @@ import { Overview } from "./pages/Overview";
 import { Proxies } from "./pages/Proxies";
 import { Vpn } from "./pages/Vpn";
 import { RouteMapPage } from "./pages/RouteMap";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Browsers } from "./pages/Browsers";
 import { Guide } from "./pages/Guide";
 import { Apps } from "./pages/Apps";
@@ -138,6 +139,7 @@ function App() {
         <div className="flex min-h-0 flex-1">
           {view !== null && <Sidebar view={view} onNavigate={navigate} />}
           <main className="min-h-0 flex-1 overflow-y-auto">
+            <ErrorBoundary>
             <AnimatePresence mode="wait" custom={direction}>
               <motion.div
                 key={view ?? "loading"}
@@ -169,6 +171,7 @@ function App() {
                 )}
               </motion.div>
             </AnimatePresence>
+            </ErrorBoundary>
           </main>
         </div>
       </div>
