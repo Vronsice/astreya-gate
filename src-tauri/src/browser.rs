@@ -235,8 +235,8 @@ pub fn disable() -> Result<(), String> {
 }
 
 /// WinINET: сообщить приложениям об изменении настроек прокси (без этого
-/// уже запущенные браузеры живут со старым конфигом до перезапуска).
-fn notify_wininet() {
+/// уже запущенные браузеры узнают о смене только после перезапуска).
+pub fn notify_wininet() {
     let script = "\
        $sig = '[DllImport(\"wininet.dll\", SetLastError=true)] public static extern bool InternetSetOption(IntPtr h, int opt, IntPtr buf, int len);'; \
        $t = Add-Type -MemberDefinition $sig -Name W -Namespace P -PassThru; \

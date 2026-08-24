@@ -373,6 +373,17 @@ export async function vpnTunDisable(): Promise<TunStatus> {
   return invoke<TunStatus>("vpn_tun_disable");
 }
 
+// ─── VPN: системный прокси браузеров ─────────────────────────────
+
+/** WinINET-прокси на порт туннеля. Авто-выключается при смерти туннеля. */
+export async function vpnSystemProxySet(v: boolean): Promise<boolean> {
+  return invoke<boolean>("vpn_system_proxy_set", { v });
+}
+
+export async function vpnSystemProxyGet(): Promise<boolean> {
+  return invoke<boolean>("vpn_system_proxy_get");
+}
+
 // ─── Окна (для трей-попапа) ──────────────────────────────────────
 
 /** Показать главное окно (из трей-попапа). */

@@ -1599,6 +1599,71 @@ pub async fn vpn_tun_disable() -> Result<crate::vpn::TunStatus, String> {
     Ok(crate::vpn::tun_status())
 }
 
+// ─── VPN: системный прокси браузеров ────────────────────────────
+
+#[tauri::command]
+pub async fn vpn_system_proxy_set(v: bool) -> Result<bool, String> {
+    let port = settings::load().vpn_port;
+    tokio::task::spawn_blocking(move || {
+        if v {
+            crate::vpn::sys_proxy_enable(port)
+        } else {
+            crate::vpn::sys_proxy_disable()
+        }
+    })
+    .await
+    .map_err(|e| format!("Внутренняя ошибка: {e}"))??;
+    Ok(crate::vpn::sys_proxy_enabled())
+}
+
+#[tauri::command]
+pub fn vpn_system_proxy_get() -> bool {
+    crate::vpn::sys_proxy_enabled()
+}
+
+/// (Пере)создать аварийный .bat на рабочем столе. Вызывается при старте:
+/// скрипт сбрасывает всю сетевую обвязку в базовое состояние БЕЗ сети и
+/// БЕЗ внешней помощи — двойной клик, и интернет-настройки чисты.
+pub fn write_panic_script() {
+    use std::fmt::Write as _;
+    let Some(desktop) = crate::apps::desktop_dir() else {
+        return;
+    };
+    let path = desktop.join("Аварийное восстановление интернета.bat");
+    let mut s = String::new();
+    let _ = writeln!(s, "@echo off");
+    let _ = writeln!(s, "chcp 65001 >nul");
+    let _ = writeln!(s, "title Аварийное восстановление интернета — Astreya Gate");
+    let _ = writeln!(s, "echo ============================================");
+    let _ = writeln!(s, "echo  Аварийное восстановление интернета");
+    let _ = writeln!(s, "echo  Сбрасывает всё: туннели, прокси, переменные.");
+    let _ = writeln!(s, "echo ============================================");
+    let _ = writeln!(s, "echo.");
+    let _ = writeln!(s, "echo [1/6] Останавливаю туннель sing-box...");
+    let _ = writeln!(s, "taskkill /IM sing-box.exe /F >nul 2>&1");
+    let _ = writeln!(s, "echo [2/6] Останавливаю задачу AstreyaGateTUN...");
+    let _ = writeln!(s, "schtasks /End /TN AstreyaGateTUN >nul 2>&1");
+    let _ = writeln!(s, "schtasks /Delete /TN AstreyaGateTUN /F >nul 2>&1");
+    let _ = writeln!(s, "echo [3/6] Выключаю системный прокси Windows...");
+    let _ = writeln!(s, "reg add \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\" /v ProxyEnable /t REG_DWORD /d 0 /f >nul 2>&1");
+    let _ = writeln!(s, "reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\" /v ProxyServer /f >nul 2>&1");
+    let _ = writeln!(s, "reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\" /v AutoConfigURL /f >nul 2>&1");
+    let _ = writeln!(s, "echo [4/6] Убираю глобальные прокси-переменные...");
+    let _ = writeln!(s, "reg delete \"HKCU\\Environment\" /v HTTP_PROXY /f >nul 2>&1");
+    let _ = writeln!(s, "reg delete \"HKCU\\Environment\" /v HTTPS_PROXY /f >nul 2>&1");
+    let _ = writeln!(s, "reg delete \"HKCU\\Environment\" /v http_proxy /f >nul 2>&1");
+    let _ = writeln!(s, "reg delete \"HKCU\\Environment\" /v https_proxy /f >nul 2>&1");
+    let _ = writeln!(s, "reg delete \"HKCU\\Environment\" /v NO_PROXY /f >nul 2>&1");
+    let _ = writeln!(s, "echo [5/6] Сбрасываю DNS-кэш...");
+    let _ = writeln!(s, "ipconfig /flushdns >nul 2>&1");
+    let _ = writeln!(s, "echo [6/6] Готово. Трафик напрямую, без прокси и туннелей.");
+    let _ = writeln!(s, "echo Вернуть VPN: запусти Astreya Gate и включи нужный режим.");
+    let _ = writeln!(s, "pause");
+    if std::fs::write(&path, s).is_ok() {
+        tracing::info!("аварийный скрипт: {}", path.display());
+    }
+}
+
 /// Обработать deep-link / ссылку из буфера: astreya://, happ://add,
 /// happ-crypt (ошибка), либо плейн-ссылки конфигов.
 /// Возвращает человекочитаемый итог для тоста.

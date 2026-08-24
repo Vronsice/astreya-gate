@@ -1073,6 +1073,7 @@ pub fn start_routed(
     }
     cmd.spawn()
         .map_err(|e| format!("sing-box не запустился: {e}"))?;
+    VPN_WANTED.store(true, Ordering::Relaxed);
 
     // Дать поднять listener; порт — честный признак живого туннеля.
     for _ in 0..20 {
@@ -1091,6 +1092,12 @@ pub fn start_routed(
 
 /// Остановить все процессы sing-box. Возвращает сколько убито.
 pub fn stop() -> usize {
+    // Ручной стоп снимает ожидание watchdog'а и убирает системный прокси
+    // браузеров (иначе он указывал бы на мёртвый порт).
+    VPN_WANTED.store(false, Ordering::Relaxed);
+    if SYS_PROXY_WANTED.load(Ordering::Relaxed) {
+        let _ = sys_proxy_disable();
+    }
     let mut sys = System::new_with_specifics(
         RefreshKind::new().with_processes(ProcessRefreshKind::everything()),
     );
@@ -1654,6 +1661,121 @@ fn run_elevated(inner_script: &str) -> Result<(), String> {
     } else {
         Err("Не удалось подтвердить регистрацию задачи TUN".into())
     }
+}
+
+// ─── Watchdog VPN + системный прокси для браузеров ───────────────
+//
+// Принцип отказоустойчивости: восстановление НИКОГДА не должно требовать
+// ни работающей сети, ни внешней помощи. Поэтому:
+//   - туннель, включённый пользователем, поднимается watchdog'ом сам;
+//   - системный прокси браузеров автоматически выключается при смерти
+//     туннеля — нет «мёртвого захвата» трафика;
+//   - на рабочем столе лежит аварийный .bat, сбрасывающий всю сетевую
+//     обвязку в базовое состояние (создаётся/обновляется при старте).
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Пользователь включал туннель и ожидает, что он работает.
+pub static VPN_WANTED: AtomicBool = AtomicBool::new(false);
+/// Пользователь включал системный прокси браузеров.
+static SYS_PROXY_WANTED: AtomicBool = AtomicBool::new(false);
+
+const WININET_PATH: &str = r"HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings";
+
+/// Системный прокси Windows (WinINET) → локальный порт туннеля.
+/// Chrome/Edge/Opera и Firefox (в дефолтном режиме) ходят через него.
+pub fn sys_proxy_enable(port: u16) -> Result<(), String> {
+    let script = format!(
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; \
+         Set-ItemProperty -Path '{p}' -Name ProxyEnable -Value 1 -Type DWord; \
+         Set-ItemProperty -Path '{p}' -Name ProxyServer -Value '127.0.0.1:{port}' -Type String; \
+         Set-ItemProperty -Path '{p}' -Name ProxyOverride -Value 'localhost;127.0.0.1;<local>' -Type String; \
+         Write-Output 'OK'",
+        p = WININET_PATH,
+    );
+    crate::tasks::run_ps_public(&script)
+        .filter(|o| o.contains("OK"))
+        .ok_or_else(|| String::from("не удалось включить системный прокси"))?;
+    SYS_PROXY_WANTED.store(true, Ordering::Relaxed);
+    crate::browser::notify_wininet();
+    Ok(())
+}
+
+pub fn sys_proxy_disable() -> Result<(), String> {
+    let script = format!(
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; \
+         Set-ItemProperty -Path '{p}' -Name ProxyEnable -Value 0 -Type DWord; \
+         Write-Output 'OK'",
+        p = WININET_PATH,
+    );
+    crate::tasks::run_ps_public(&script)
+        .filter(|o| o.contains("OK"))
+        .ok_or_else(|| String::from("не удалось выключить системный прокси"))?;
+    SYS_PROXY_WANTED.store(false, Ordering::Relaxed);
+    crate::browser::notify_wininet();
+    Ok(())
+}
+
+pub fn sys_proxy_enabled() -> bool {
+    let out = crate::tasks::run_ps_public(&format!(
+        "(Get-ItemProperty -Path '{p}' -ErrorAction SilentlyContinue).ProxyEnable",
+        p = WININET_PATH
+    ))
+    .unwrap_or_default();
+    out.trim() == "1"
+}
+
+/// Watchdog: 5-секундный цикл. Две обязанности:
+///   1) туннель, включённый пользователем, умер → поднять;
+///   2) системный прокси был включён, а туннель умер → ВЫКЛЮЧИТЬ прокси
+///      (иначе браузер без интернета из-за мёртвого 127.0.0.1).
+pub fn spawn_vpn_watchdog() {
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        let mut fail_streak = 0u32;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            let running = process_status().running;
+
+            // Мёртвый туннель + включённый системный прокси → снять прокси.
+            if SYS_PROXY_WANTED.load(Ordering::Relaxed) && !running {
+                if let Err(e) = sys_proxy_disable() {
+                    tracing::warn!("watchdog: не снять системный прокси: {e}");
+                } else {
+                    tracing::warn!("watchdog VPN: туннель мёртв — системный прокси браузеров выключен (защита от чёрного экрана)");
+                }
+            }
+
+            // Включённый пользователем туннель умер → поднять заново.
+            if VPN_WANTED.load(Ordering::Relaxed) && !running {
+                let s = crate::settings::load();
+                let node = s
+                    .vpn_nodes
+                    .iter()
+                    .find(|n| Some(n.id.as_str()) == s.vpn_active.as_deref())
+                    .map(|n| n.link.clone());
+                match node {
+                    Some(link) => match start(&link, s.vpn_port) {
+                        Ok(_) => {
+                            fail_streak = 0;
+                            tracing::info!("watchdog VPN: туннель восстановлен");
+                        }
+                        Err(e) => {
+                            fail_streak += 1;
+                            tracing::warn!("watchdog VPN: попытка {fail_streak}: {e}");
+                            // 6 неудач подряд: перестаём долбить — вероятно,
+                            // порт занят другим клиентом.
+                            if fail_streak >= 6 {
+                                VPN_WANTED.store(false, Ordering::Relaxed);
+                                tracing::warn!("watchdog VPN: сдался после 6 неудач — включи туннель вручную");
+                            }
+                        }
+                    },
+                    None => VPN_WANTED.store(false, Ordering::Relaxed),
+                }
+            }
+        }
+    });
 }
 
 // ─── Тесты парсеров ссылок ───────────────────────────────────────

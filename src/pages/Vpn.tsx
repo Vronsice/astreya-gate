@@ -31,6 +31,8 @@ import {
   vpnSetRoute,
   vpnStart,
   vpnStop,
+  vpnSystemProxyGet,
+  vpnSystemProxySet,
   vpnTunDisable,
   vpnTunEnable,
   vpnTunStatus,
@@ -69,6 +71,7 @@ function ago(ts?: number): string {
 export function Vpn() {
   const [ov, setOv] = useState<VpnOverview | null>(null);
   const [tun, setTun] = useState<TunStatus | null>(null);
+  const [sysProxy, setSysProxy] = useState<boolean | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pings, setPings] = useState<Record<string, number | null>>({});
@@ -116,6 +119,7 @@ export function Vpn() {
       setError(String(e));
     }
     setTun(await vpnTunStatus().catch(() => null));
+    setSysProxy(await vpnSystemProxyGet().catch(() => null));
   }, [adopt]);
 
   useEffect(() => {
@@ -455,6 +459,50 @@ export function Vpn() {
             Выберите ноду ниже — затем включите режим.
           </p>
         )}
+      </motion.section>
+
+      {/* ── Браузеры через VPN (системный прокси) ── */}
+      <motion.section variants={fadeInUp} className="surface-card p-4">
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="text-[14px] font-semibold text-vb-fg">
+                Браузеры через VPN
+              </span>
+              <InfoTip>
+                Включает системный прокси Windows на порт туннеля: Chrome,
+                Edge, Opera и Firefox (в режиме «системные настройки») начнут
+                ходить через активную ноду. Без прав администратора, без
+                таблиц маршрутизации. Если туннель упадёт — прокси
+                отключится автоматически, интернет останется напрямую.
+              </InfoTip>
+            </div>
+            <p className="mt-1 text-[12px] leading-relaxed text-vb-silver-dim">
+              Самый надёжный способ пустить браузер через VPN. Для проверки
+              открой speedtest.net — страной выхода станет страна ноды.
+            </p>
+          </div>
+          {busy === "sysproxy" ? (
+            <Loader2 className="h-4 w-4 shrink-0 animate-spin text-vb-silver-dim" />
+          ) : (
+            <Toggle
+              checked={sysProxy ?? false}
+              onChange={async (v) => {
+                setBusy("sysproxy");
+                setError(null);
+                try {
+                  setSysProxy(await vpnSystemProxySet(v));
+                } catch (e) {
+                  setError(String(e));
+                } finally {
+                  setBusy(null);
+                }
+              }}
+              disabled={busy !== null}
+              label="Браузеры через VPN"
+            />
+          )}
+        </div>
       </motion.section>
 
       {/* ── Подписки ── */}

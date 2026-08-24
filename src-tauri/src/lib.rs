@@ -136,6 +136,8 @@ pub fn run() {
             commands::vpn_tun_status,
             commands::vpn_tun_enable,
             commands::vpn_tun_disable,
+            commands::vpn_system_proxy_set,
+            commands::vpn_system_proxy_get,
             // Окна (трей-попап)
             commands::show_main_window,
             commands::quit_app,
@@ -219,6 +221,14 @@ pub fn run() {
             // ошибки, поднимает шим за ~5с после падения. Второй эшелон после
             // RestartOnFailure Планировщика (тот работает и без нашего GUI).
             shim::spawn_watchdog();
+
+            // Watchdog VPN: поднимает упавший туннель и снимает системный
+            // прокси браузеров при мёртвом туннеле (защита от чёрного экрана).
+            vpn::spawn_vpn_watchdog();
+
+            // Аварийная кнопка на рабочем столе: сброс сетевой обвязки без
+            // сети и без внешней помощи (двойной клик — базовое состояние).
+            std::thread::spawn(commands::write_panic_script);
 
             // Миграция старых установок: .vbs в Startup → задача Планировщика
             // с автоперезапуском. Фоново — PS-вызовы медленные, UI не ждёт.
