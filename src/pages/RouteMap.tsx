@@ -131,9 +131,8 @@ function BrowserNode({ data, selected }: NodeProps) {
 
 function AppsNode({ data, selected }: NodeProps) {
   const d = (data as unknown as SourceNodeData) ?? { live: EMPTY_LIVE, envOn: false, active: false };
-  const h = d.live.ov; void h;
   return (
-    <NodeShell active={d.active} selected={selected} handles="r">
+    <NodeShell active={!!d.active} selected={selected} handles="r">
       <div className="flex items-center gap-2">
         <AppWindow className="h-4 w-4 text-vb-silver-dim" />
         <span className="text-[13px] font-semibold text-vb-fg">Приложения</span>
@@ -160,9 +159,9 @@ function EnvNode({ data, selected }: NodeProps) {
 
 type VpnNodeData = { live: MapData };
 function TunnelNode({ data, selected }: NodeProps) {
-  const d = (data as unknown as VpnNodeData) ?? { live: EMPTY_LIVE };
-  const running = d.live.ov?.process.running ?? false;
-  const node = d.live.ov?.nodes.find((n) => n.id === d.live.ov?.active);
+  const live = (data as unknown as VpnNodeData | undefined)?.live ?? EMPTY_LIVE;
+  const running = live.ov?.process.running ?? false;
+  const node = live.ov?.nodes.find((n) => n.id === live.ov?.active);
   return (
     <NodeShell active={running} selected={selected}>
       <div className="flex items-center gap-2">
@@ -190,13 +189,13 @@ function TunnelNode({ data, selected }: NodeProps) {
       </div>
       <div className="mt-1 truncate text-[11px] text-vb-silver-faint">
         {running
-          ? `${node?.name ?? "нода"} · ${formatUptime(d.live?.ov?.process.uptime_sec)}`
+          ? `${node?.name ?? "нода"} · ${formatUptime(live.ov?.process.uptime_sec)}`
           : "выключен"}
       </div>
-      {running && d.live?.speed && (
+      {running && live.speed && (
         <div className="mt-2 grid grid-cols-2 gap-1.5">
-          <MetricChip label="приём" value={fmtSpeed(d.live?.speed?.down)} accent />
-          <MetricChip label="отдача" value={fmtSpeed(d.live?.speed?.up)} />
+          <MetricChip label="приём" value={fmtSpeed(live.speed.down)} accent />
+          <MetricChip label="отдача" value={fmtSpeed(live.speed.up)} />
         </div>
       )}
     </NodeShell>
