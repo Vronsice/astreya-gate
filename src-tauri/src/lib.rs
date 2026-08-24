@@ -302,7 +302,7 @@ fn show_tray_popup(app: &tauri::AppHandle, cx: f64, cy: f64) {
                 tauri::WebviewUrl::App("index.html?view=tray".into()),
             )
             .title("Astreya Gate")
-            .inner_size(332.0, 404.0)
+            .inner_size(332.0, 560.0)
             .resizable(false)
             .decorations(false)
             .transparent(true)
@@ -350,7 +350,7 @@ fn show_tray_popup(app: &tauri::AppHandle, cx: f64, cy: f64) {
         (x, y)
     };
 
-    let size = win.outer_size().unwrap_or(tauri::PhysicalSize::new(332, 424));
+    let size = win.outer_size().unwrap_or(tauri::PhysicalSize::new(332, 580));
     let (x, y) = place(size.width as f64, size.height as f64);
     let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
     // Смешанные DPI: перенос окна на монитор с другим масштабом меняет его

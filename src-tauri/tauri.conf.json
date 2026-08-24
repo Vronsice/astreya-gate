@@ -1,7 +1,7 @@
-{
+﻿{
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Astreya Gate",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "identifier": "ru.vronsice.astreyagate",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -38,7 +38,7 @@
         "title": "Astreya Gate",
         "url": "index.html?view=tray",
         "width": 332,
-        "height": 404,
+        "height": 560,
         "resizable": false,
         "decorations": false,
         "transparent": true,
@@ -75,8 +75,8 @@
     "publisher": "vronsice",
     "copyright": "Copyright (c) 2026 vronsice",
     "category": "DeveloperTool",
-    "shortDescription": "Astreya Gate — прокси и маршрутизация для AI и любых приложений",
-    "longDescription": "Astreya Gate — десктопный центр управления приватностью: локальный мост с инжектом авторизации, маршрутизация по доменам (AI-сервисы через платный прокси, остальное через системный), PAC для браузеров, killswitch через файрвол. Автор: vronsice.",
+    "shortDescription": "Astreya Gate вЂ” РїСЂРѕРєСЃРё Рё РјР°СЂС€СЂСѓС‚РёР·Р°С†РёСЏ РґР»СЏ AI Рё Р»СЋР±С‹С… РїСЂРёР»РѕР¶РµРЅРёР№",
+    "longDescription": "Astreya Gate вЂ” РґРµСЃРєС‚РѕРїРЅС‹Р№ С†РµРЅС‚СЂ СѓРїСЂР°РІР»РµРЅРёСЏ РїСЂРёРІР°С‚РЅРѕСЃС‚СЊСЋ: Р»РѕРєР°Р»СЊРЅС‹Р№ РјРѕСЃС‚ СЃ РёРЅР¶РµРєС‚РѕРј Р°РІС‚РѕСЂРёР·Р°С†РёРё, РјР°СЂС€СЂСѓС‚РёР·Р°С†РёСЏ РїРѕ РґРѕРјРµРЅР°Рј (AI-СЃРµСЂРІРёСЃС‹ С‡РµСЂРµР· РїР»Р°С‚РЅС‹Р№ РїСЂРѕРєСЃРё, РѕСЃС‚Р°Р»СЊРЅРѕРµ С‡РµСЂРµР· СЃРёСЃС‚РµРјРЅС‹Р№), PAC РґР»СЏ Р±СЂР°СѓР·РµСЂРѕРІ, killswitch С‡РµСЂРµР· С„Р°Р№СЂРІРѕР». РђРІС‚РѕСЂ: vronsice.",
     "windows": {
       "webviewInstallMode": {
         "type": "embedBootstrapper"

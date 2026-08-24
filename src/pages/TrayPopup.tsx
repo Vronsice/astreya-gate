@@ -1,121 +1,226 @@
-import { useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Activity,
+  ChevronDown,
   ExternalLink,
+  Globe,
   Loader2,
   LogOut,
-  Network,
-  Pause,
-  Play,
-  RotateCw,
-  Route,
+  Power,
+  Zap,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Toggle } from "../components/Toggle";
 import { StatusOrb } from "../components/StatusOrb";
-import { NumberTicker } from "../components/NumberTicker";
 import {
   bridgeSetRouteMode,
   clearGlobalProxyEnv,
-  quitApp,
   setGlobalProxyEnv,
-  shimRestart,
-  shimStart,
-  shimStop,
+  quitApp,
   shimTest,
   showMainWindow,
+  vpnOverview,
+  vpnPingAll,
+  vpnSetActive,
+  vpnStart,
+  vpnStop,
+  vpnSystemProxyGet,
+  vpnSystemProxySet,
 } from "../lib/api";
 import { formatUptime, useStatus } from "../lib/status";
-import type { ShimTestResult } from "../lib/types";
+import type { VpnOverview } from "../lib/types";
 import { cn } from "../lib/cn";
 
+/* Флаг из имени ноды («ch Швейцария» → 🇨🇭). Иначе — глобус. */
+function flagOf(name: string): string {
+  const m = name.match(/^([a-z]{2})\b/i);
+  if (!m) return "🌐";
+  return m[1].toUpperCase().replace(/./g, (c) => String.fromCodePoint(127397 + c.charCodeAt(0)));
+}
+
+const fmtSpeed = (bps?: number) =>
+  bps === undefined || bps === null
+    ? "—"
+    : bps >= 1_048_576
+      ? `${(bps / 1_048_576).toFixed(1)} МБ/с`
+      : bps >= 1024
+        ? `${Math.round(bps / 1024)} КБ/с`
+        : `${Math.round(bps)} Б/с`;
+
 /*
-  Трей-попап: компактная живая панель у иконки трея (левый клик) — паттерн
-  Tailscale/WARP вместо нативного меню. Окно прозрачное, скрывается по blur
-  (Rust), тень рисуем CSS. Всё управление — не открывая большого окна.
+  Трей-попап = мини-приложение (паттерн Tailscale/WARP): VPN-герой с
+  питанием и сменой ноды наверху, тумблеры ниже, мост — строкой статуса.
+  Окно прозрачное, скрывается по blur (Rust), панель прижата к трею.
 */
 export function TrayPopup() {
   const { status, health, refresh, env, setEnv } = useStatus();
 
-  const [busy, setBusy] = useState<"start" | "stop" | "restart" | "test" | null>(null);
-  const [testResult, setTestResult] = useState<ShimTestResult | null>(null);
-  const [envBusy, setEnvBusy] = useState(false);
-  const [routeBusy, setRouteBusy] = useState(false);
-  /** Ошибка последнего действия: без неё упавшая команда выглядит как
-      «нажал и ничего не произошло». Гаснет сама. */
-  const [actionError, setActionError] = useState<string | null>(null);
+  const [ov, setOv] = useState<VpnOverview | null>(null);
+  const [pings, setPings] = useState<Record<string, number> | null>(null);
+  const [sysProxy, setSysProxy] = useState<boolean | null>(null);
+  const [speed, setSpeed] = useState<{ up: number; down: number } | null>(null);
+  const [busy, setBusy] = useState<"power" | "node" | "best" | "test" | "sysproxy" | "env" | "route" | null>(null);
+  const [listOpen, setListOpen] = useState(false);
+  const [testResult, setResult] = useState<string | null>(null);
+  const [actionError, setError] = useState<string | null>(null);
+
+  const lastTotals = useRef<{ t: number; up: number; down: number } | null>(null);
   const failFlash = (e: unknown) => {
-    setActionError(String(e));
-    window.setTimeout(() => setActionError(null), 6000);
+    setError(String(e));
+    window.setTimeout(() => setError(null), 6000);
   };
 
-  const loading = status === null;
-  const running = status?.running ?? false;
-  const upstreamDown = health !== null && health.upstreams.some((u) => !u.healthy);
-  const orb = loading
-    ? ("loading" as const)
-    : !running
-      ? ("down" as const)
-      : upstreamDown
-        ? ("warn" as const)
-        : ("ok" as const);
+  const loadVpn = useCallback(async () => {
+    try {
+      const o = await vpnOverview();
+      const now = Date.now() / 1000;
+      if (lastTotals.current && o.up_total !== undefined && o.down_total !== undefined) {
+        const dt = now - lastTotals.current.t;
+        if (dt > 0.5) {
+          setSpeed({
+            up: Math.max(0, (o.up_total - lastTotals.current.up) / dt),
+            down: Math.max(0, (o.down_total - lastTotals.current.down) / dt),
+          });
+        }
+      }
+      if (o.up_total !== undefined && o.down_total !== undefined) {
+        lastTotals.current = { t: now, up: o.up_total, down: o.down_total };
+      }
+      setOv(o);
+    } catch {
+      /* трей переживает недоступность бэкенда */
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadVpn();
+    void vpnSystemProxyGet().then(setSysProxy).catch(() => setSysProxy(null));
+    const iv = window.setInterval(() => void loadVpn(), 2000);
+    return () => window.clearInterval(iv);
+  }, [loadVpn]);
+
+  const vpnRunning = ov?.process.running ?? false;
+  const activeNode = useMemo(
+    () => ov?.nodes.find((n) => n.id === ov.active) ?? null,
+    [ov],
+  );
+
+  const ensurePings = useCallback(async () => {
+    if (pings) return pings;
+    const r = await vpnPingAll();
+    const clean: Record<string, number> = {};
+    for (const [k, v] of Object.entries(r)) if (v !== null && v > 0) clean[k] = v;
+    setPings(clean);
+    return clean;
+  }, [pings]);
+
+  const power = async () => {
+    setBusy("power");
+    setError(null);
+    try {
+      if (vpnRunning) {
+        setOv(await vpnStop());
+      } else {
+        if (!ov?.active) {
+          setError("Сначала выбери ноду в приложении");
+          return;
+        }
+        setOv(await vpnStart());
+      }
+    } catch (e) {
+      failFlash(e);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /* Сменить ноду: выбор + перезапуск туннеля, если он был поднят. */
+  const switchNode = async (id: string) => {
+    setBusy("node");
+    setError(null);
+    try {
+      let o = await vpnSetActive(id);
+      if (o.process.running) {
+        o = await vpnStop();
+        o = await vpnStart();
+      }
+      setOv(o);
+      setListOpen(false);
+    } catch (e) {
+      failFlash(e);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const bestNode = async () => {
+    setBusy("best");
+    setError(null);
+    try {
+      const p = await ensurePings();
+      const best = Object.entries(p).sort((a, b) => a[1] - b[1])[0];
+      if (!best) {
+        setError("Все ноды недоступны — обнови подписку");
+        return;
+      }
+      await switchNode(best[0]);
+    } catch (e) {
+      failFlash(e);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const toggleSysProxy = async () => {
+    setBusy("sysproxy");
+    setError(null);
+    try {
+      setSysProxy(await vpnSystemProxySet(!(sysProxy ?? false)));
+    } catch (e) {
+      failFlash(e);
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const envOn = (env?.present ?? false) && (env?.points_to_bridge ?? false);
   const smartOn = health?.mode === "smart";
-
-  const act = async (
-    kind: "start" | "stop" | "restart",
-    fn: () => Promise<unknown>,
-  ) => {
-    setBusy(kind);
-    setActionError(null);
-    try {
-      await fn();
-      await refresh();
-    } catch (e) {
-      failFlash(e);
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const handleTest = async () => {
-    setBusy("test");
-    setTestResult(null);
-    setActionError(null);
-    try {
-      setTestResult(await shimTest());
-      window.setTimeout(() => setTestResult(null), 6000);
-    } catch (e) {
-      failFlash(e);
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const handleEnvToggle = async () => {
-    setEnvBusy(true);
-    setActionError(null);
+  const toggleEnv = async () => {
+    setBusy("env");
+    setError(null);
     try {
       setEnv(envOn ? await clearGlobalProxyEnv() : await setGlobalProxyEnv());
     } catch (e) {
       failFlash(e);
     } finally {
-      setEnvBusy(false);
+      setBusy(null);
     }
   };
-
-  const handleRouteToggle = async () => {
-    setRouteBusy(true);
-    setActionError(null);
+  const toggleSmart = async () => {
+    setBusy("route");
+    setError(null);
     try {
       await bridgeSetRouteMode(smartOn ? "all" : "smart");
       await refresh();
     } catch (e) {
       failFlash(e);
     } finally {
-      setRouteBusy(false);
+      setBusy(null);
+    }
+  };
+
+  const runTest = async () => {
+    setBusy("test");
+    setError(null);
+    try {
+      const r = await shimTest();
+      setResult(r.ok ? `${r.external_ip ?? "OK"} · ${r.latency_ms ?? "—"} мс` : r.error ?? "ошибка");
+      window.setTimeout(() => setResult(null), 6000);
+    } catch (e) {
+      failFlash(e);
+    } finally {
+      setBusy(null);
     }
   };
 
@@ -124,10 +229,18 @@ export function TrayPopup() {
     await getCurrentWindow().hide();
   };
 
+  const sortedNodes = useMemo(() => {
+    if (!ov) return [];
+    return [...ov.nodes]
+      .sort((a, b) => (pings?.[a.id] ?? 99999) - (pings?.[b.id] ?? 99999))
+      .slice(0, 14);
+  }, [ov, pings]);
+
+  const orb = !ov ? ("loading" as const) : vpnRunning ? ("ok" as const) : ("down" as const);
+
+  const row = "flex items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-vb-surface-2/50 disabled:opacity-60";
+
   return (
-    // Панель хугает контент и прижата к низу окна (к трею): лишняя площадь
-    // окна прозрачна и невидима, при раскрытии результата теста панель растёт
-    // ВВЕРХ. Клик по прозрачной зоне — закрыть (как клик мимо).
     <div
       className="flex h-screen w-screen flex-col justify-end p-2.5"
       onMouseDown={(e) => {
@@ -135,56 +248,131 @@ export function TrayPopup() {
       }}
     >
       <div className="flex flex-col overflow-hidden rounded-lg border border-vb-border bg-vb-bg shadow-[0_16px_48px_rgba(0,0,0,0.55)]">
-        {/* Статус */}
+        {/* ── VPN-герой ── */}
         <div className="flex items-center gap-3 px-4 pb-3 pt-4">
           <StatusOrb state={orb} size={11} />
           <div className="min-w-0 flex-1">
             <div className="text-[14px] font-semibold leading-tight text-vb-fg">
-              {loading ? "Проверяю…" : running ? "Мост активен" : "Мост остановлен"}
+              {!ov ? "Проверяю…" : vpnRunning ? "Защищено" : "Выключено"}
             </div>
-            <div className="tnum text-[11px] text-vb-silver-faint">
-              {running
-                ? `${formatUptime(health?.uptime_sec ?? status?.uptime_sec)}${
-                    health ? ` · ${health.mode === "smart" ? "smart" : "весь трафик"}` : ""
-                  }`
-                : "трафик не проксируется"}
+            <div className="truncate tnum text-[11px] text-vb-silver-faint">
+              {vpnRunning
+                ? `${activeNode?.name ?? "нода"}${
+                    speed ? ` · ↓ ${fmtSpeed(speed.down)} · ↑ ${fmtSpeed(speed.up)}` : ""
+                  }${ov?.process.uptime_sec ? ` · ${formatUptime(ov.process.uptime_sec)}` : ""}`
+                : ov?.active
+                  ? `нода: ${activeNode?.name ?? "—"}`
+                  : "нода не выбрана"}
             </div>
           </div>
-          {running ? (
-            <div className="flex shrink-0 gap-1">
-              <button
-                type="button"
-                onClick={() => act("restart", shimRestart)}
-                disabled={busy !== null}
-                className="rounded-lg p-2 text-vb-silver-dim transition-colors hover:bg-vb-surface-2 hover:text-vb-silver active:scale-[0.95] disabled:opacity-35"
-                title="Перезапустить мост"
-              >
-                <RotateCw className={cn("h-4 w-4", busy === "restart" && "animate-spin")} />
-              </button>
-              <button
-                type="button"
-                onClick={() => act("stop", shimStop)}
-                disabled={busy !== null}
-                className="rounded-lg p-2 text-vb-silver-dim transition-colors hover:bg-vb-surface-2 hover:text-vb-loss active:scale-[0.95] disabled:opacity-35"
-                title="Остановить мост"
-              >
-                <Pause className="h-4 w-4" />
-              </button>
-            </div>
-          ) : loading ? null : (
+          {busy === "power" ? (
+            <Loader2 className="h-5 w-5 shrink-0 animate-spin text-vb-silver-dim" />
+          ) : (
             <button
               type="button"
-              onClick={() => act("start", shimStart)}
-              disabled={busy !== null}
-              className="flex shrink-0 items-center gap-1.5 rounded-lg bg-vb-emerald px-3 py-1.5 text-[12px] font-semibold text-black transition-colors hover:bg-vb-emerald-bright active:scale-[0.97] disabled:opacity-50"
+              onClick={power}
+              disabled={busy !== null || !ov}
+              title={vpnRunning ? "Отключить VPN" : "Включить VPN"}
+              className={cn(
+                "flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-all active:scale-[0.92] disabled:opacity-40",
+                vpnRunning
+                  ? "bg-vb-emerald/15 text-vb-emerald hover:bg-vb-emerald/25"
+                  : "bg-vb-surface text-vb-silver-dim hover:bg-vb-surface-2 hover:text-vb-emerald",
+              )}
             >
-              <Play className="h-3.5 w-3.5" />
-              Запустить
+              <Power className="h-4 w-4" strokeWidth={2.2} />
             </button>
           )}
         </div>
 
-        {/* Ошибка последнего действия */}
+        {/* ── Смена ноды ── */}
+        <button
+          type="button"
+          onClick={() => void ensurePings().catch(() => {})}
+          onMouseDown={() => setListOpen((v) => !v)}
+          disabled={!ov || ov.nodes.length === 0}
+          className={cn(row, "border-y border-vb-border/60 py-2 disabled:opacity-40")}
+        >
+          <span className="text-[15px] leading-none">{activeNode ? flagOf(activeNode.name) : <Globe className="h-4 w-4 text-vb-silver-dim" />}</span>
+          <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-vb-silver">
+            {activeNode?.name ?? "Выбрать ноду"}
+          </span>
+          {pings && activeNode && pings[activeNode.id] && (
+            <span className="tnum text-[11px] text-vb-silver-faint">{pings[activeNode.id]} мс</span>
+          )}
+          <ChevronDown className={cn("h-3.5 w-3.5 text-vb-silver-faint transition-transform", listOpen && "rotate-180")} />
+        </button>
+
+        <AnimatePresence>
+          {listOpen && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: "auto" }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+              className="overflow-hidden border-b border-vb-border/60"
+            >
+              <div className="max-h-40 overflow-y-auto py-1">
+                {sortedNodes.map((n) => (
+                  <button
+                    key={n.id}
+                    type="button"
+                    onClick={() => void switchNode(n.id)}
+                    disabled={busy !== null}
+                    className="flex w-full items-center gap-2.5 px-4 py-1.5 text-left transition-colors hover:bg-vb-surface-2/60 disabled:opacity-50"
+                  >
+                    <span className="text-[13px] leading-none">{flagOf(n.name)}</span>
+                    <span className="min-w-0 flex-1 truncate text-[12.5px] text-vb-silver">{n.name}</span>
+                    <span className={cn("tnum text-[11px]", pings?.[n.id] ? "text-vb-silver-faint" : "text-vb-loss/70")}>
+                      {pings?.[n.id] ? `${pings[n.id]} мс` : "—"}
+                    </span>
+                    {n.id === ov?.active && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-vb-emerald" />}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={bestNode}
+                disabled={busy !== null}
+                className={cn(row, "w-full border-t border-vb-border/40 py-2 text-vb-emerald disabled:opacity-50")}
+              >
+                {busy === "best" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />}
+                <span className="text-[13px] font-semibold">Лучшая нода</span>
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* ── Тумблеры ── */}
+        <div className="flex flex-col">
+          <button type="button" onClick={toggleSysProxy} disabled={busy !== null || sysProxy === null} className={row}>
+            <Globe className="h-4 w-4 shrink-0 text-vb-silver-dim" strokeWidth={1.9} />
+            <span className="min-w-0 flex-1 text-[13px] font-medium text-vb-silver">Браузеры через VPN</span>
+            <span className="pointer-events-none">
+              <Toggle checked={sysProxy ?? false} onChange={toggleSysProxy} disabled={busy !== null || sysProxy === null} label="Браузеры через VPN" />
+            </span>
+          </button>
+          <button type="button" onClick={toggleEnv} disabled={busy !== null || env === null} className={row}>
+            <Activity className="h-4 w-4 shrink-0 text-vb-silver-dim" strokeWidth={1.9} />
+            <span className="min-w-0 flex-1 text-[13px] font-medium text-vb-silver">Системное проксирование</span>
+            <span className="pointer-events-none">
+              <Toggle checked={envOn} onChange={toggleEnv} disabled={busy !== null || env === null} label="Системный прокси" />
+            </span>
+          </button>
+          <button type="button" onClick={smartOn !== undefined ? toggleSmart : undefined} disabled={busy !== null || !health} className={row}>
+            <Zap className="h-4 w-4 shrink-0 text-vb-silver-dim" strokeWidth={1.9} />
+            <span className="min-w-0 flex-1 text-[13px] font-medium text-vb-silver">Умная маршрутизация</span>
+            {health ? (
+              <span className="pointer-events-none">
+                <Toggle checked={smartOn} onChange={toggleSmart} disabled={busy !== null} label="Умная маршрутизация" />
+              </span>
+            ) : (
+              <span className="text-[11px] text-vb-silver-faint">н/д</span>
+            )}
+          </button>
+        </div>
+
+        {/* ── Ошибка / тест ── */}
         <AnimatePresence>
           {actionError && (
             <motion.p
@@ -199,148 +387,33 @@ export function TrayPopup() {
           )}
         </AnimatePresence>
 
-        {/* Метрики */}
-        {health && (
-          <div className="mx-4 flex items-center justify-between rounded-lg bg-vb-surface px-3 py-2">
-            <div className="text-center">
-              <div className="font-mono text-[15px] font-semibold leading-none text-vb-fg">
-                <NumberTicker value={health.via_upstream} />
-              </div>
-              <div className="mt-1 text-[9px] uppercase tracking-[0.05em] text-vb-silver-faint">
-                прокси
-              </div>
-            </div>
-            <div className="text-center">
-              <div className="font-mono text-[15px] font-semibold leading-none text-vb-fg">
-                <NumberTicker value={health.via_direct} />
-              </div>
-              <div className="mt-1 text-[9px] uppercase tracking-[0.05em] text-vb-silver-faint">
-                напрямую
-              </div>
-            </div>
-            <div className="text-center">
-              <div className="font-mono text-[15px] font-semibold leading-none text-vb-emerald">
-                <NumberTicker value={health.active} />
-              </div>
-              <div className="mt-1 text-[9px] uppercase tracking-[0.05em] text-vb-silver-faint">
-                активных
-              </div>
-            </div>
-            <div className="text-center">
-              <div
-                className={cn(
-                  "font-mono text-[15px] font-semibold leading-none",
-                  health.errors > 0 ? "text-vb-warn" : "text-vb-silver-faint",
-                )}
-              >
-                <NumberTicker value={health.errors} />
-              </div>
-              <div className="mt-1 text-[9px] uppercase tracking-[0.05em] text-vb-silver-faint">
-                ошибок
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Тумблеры */}
-        <div className="mt-3 flex flex-col">
+        <div className="px-4 pb-1 pt-0.5">
           <button
             type="button"
-            onClick={handleEnvToggle}
-            disabled={envBusy || env === null}
-            className="flex items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-vb-surface-2/50 disabled:opacity-60"
-          >
-            <Network className="h-4 w-4 shrink-0 text-vb-silver-dim" strokeWidth={1.9} />
-            <span className="min-w-0 flex-1 text-[13px] font-medium text-vb-silver">
-              Системное проксирование
-            </span>
-            {/* Toggle визуальный: клик обрабатывает вся строка (pointer-events-none
-                убирает двойное срабатывание клика по самому тумблеру). */}
-            <span className="pointer-events-none">
-              <Toggle
-                checked={envOn}
-                onChange={handleEnvToggle}
-                disabled={envBusy || env === null}
-                label="Системный прокси"
-              />
-            </span>
-          </button>
-          <button
-            type="button"
-            onClick={health ? handleRouteToggle : undefined}
-            disabled={routeBusy || !health}
-            className="flex items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-vb-surface-2/50 disabled:opacity-60"
-          >
-            <Route className="h-4 w-4 shrink-0 text-vb-silver-dim" strokeWidth={1.9} />
-            <span className="min-w-0 flex-1 text-[13px] font-medium text-vb-silver">
-              Умная маршрутизация
-            </span>
-            {health ? (
-              <span className="pointer-events-none">
-                <Toggle
-                  checked={smartOn}
-                  onChange={handleRouteToggle}
-                  disabled={routeBusy}
-                  label="Умная маршрутизация"
-                />
-              </span>
-            ) : (
-              <span className="text-[11px] text-vb-silver-faint">н/д</span>
-            )}
-          </button>
-        </div>
-
-        {/* Тест */}
-        <div className="px-4 pt-1.5">
-          <button
-            type="button"
-            onClick={handleTest}
-            disabled={busy !== null || !running}
+            onClick={runTest}
+            disabled={busy !== null}
             className="flex w-full items-center justify-center gap-2 rounded-lg border border-vb-border bg-vb-surface px-3 py-2 text-[13px] font-medium text-vb-silver transition-colors hover:border-vb-border-strong hover:bg-vb-surface-2 active:scale-[0.98] disabled:opacity-40"
           >
-            {busy === "test" ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Activity className="h-3.5 w-3.5" />
-            )}
+            {busy === "test" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Activity className="h-3.5 w-3.5" />}
             Тест соединения
           </button>
           <AnimatePresence>
             {testResult && (
-              <motion.div
+              <motion.p
                 initial={{ opacity: 0, height: 0 }}
                 animate={{ opacity: 1, height: "auto" }}
                 exit={{ opacity: 0, height: 0 }}
                 transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
-                className="overflow-hidden"
+                className="tnum overflow-hidden pt-1.5 text-center text-[12px] text-vb-silver-dim"
               >
-                <div
-                  className={cn(
-                    "tnum mt-1.5 flex items-center gap-2 rounded-lg px-3 py-1.5 text-[12px]",
-                    testResult.ok
-                      ? "bg-vb-emerald/[0.08] text-vb-emerald"
-                      : "bg-vb-loss/[0.08] text-vb-loss",
-                  )}
-                >
-                  <span
-                    className={cn(
-                      "h-1.5 w-1.5 shrink-0 rounded-full",
-                      testResult.ok ? "bg-vb-emerald" : "bg-vb-loss",
-                    )}
-                  />
-                  <span className="truncate font-mono">
-                    {testResult.ok
-                      ? `${testResult.external_ip ?? "OK"} · ${testResult.latency_ms ?? "—"} мс`
-                      : testResult.error ?? "ошибка"}
-                  </span>
-                </div>
-              </motion.div>
+                {testResult}
+              </motion.p>
             )}
           </AnimatePresence>
         </div>
 
-        {/* Футер */}
-        <div className="mt-3 flex items-center justify-between border-t border-vb-border/60 px-2 py-1.5">
+        {/* ── Мост + футер ── */}
+        <div className="flex items-center justify-between border-t border-vb-border/60 px-2 py-1.5">
           <button
             type="button"
             onClick={openApp}
@@ -349,11 +422,14 @@ export function TrayPopup() {
             <ExternalLink className="h-3.5 w-3.5" />
             Открыть приложение
           </button>
+          <span className="tnum text-[10.5px] text-vb-silver-faint" title="Мост прокси-хаба">
+            {status?.running ? `мост · ${formatUptime(health?.uptime_sec ?? status.uptime_sec)}` : "мост остановлен"}
+          </span>
           <button
             type="button"
             onClick={() => void quitApp()}
             className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] font-medium text-vb-silver-faint transition-colors hover:bg-vb-loss/10 hover:text-vb-loss active:scale-[0.97]"
-            title="Полностью выйти (мост продолжит работать)"
+            title="Полностью выйти (фоновые сервисы продолжат работать)"
           >
             <LogOut className="h-3.5 w-3.5" />
             Выход
