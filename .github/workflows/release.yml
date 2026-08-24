@@ -49,10 +49,12 @@ jobs:
       - name: Download sing-box engine
         shell: pwsh
         run: |
-          $r = Invoke-RestMethod "https://api.github.com/repos/SagerNet/sing-box/releases/latest"
-          $asset = $r.assets | Where-Object { $_.name -match "^sing-box-[\d\.]+-windows-amd64\.zip$" } | Select-Object -First 1
-          Write-Host "sing-box: $($asset.name)"
-          Invoke-WebRequest $asset.browser_download_url -OutFile singbox.zip
+          # Пин версии + прямая ссылка: не ходим в api.github.com —
+          # на раннерах он регулярно упирается в rate limit (60/ч на IP).
+          $ver = "1.13.19"
+          $url = "https://github.com/SagerNet/sing-box/releases/download/v$ver/sing-box-$ver-windows-amd64.zip"
+          Write-Host "sing-box: $url"
+          Invoke-WebRequest $url -OutFile singbox.zip
           Expand-Archive singbox.zip -DestinationPath singbox-tmp -Force
           $exe = Get-ChildItem singbox-tmp -Recurse -Filter "sing-box.exe" | Select-Object -First 1
           Copy-Item $exe.FullName src-tauri/resources/sing-box.exe -Force
